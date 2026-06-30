@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from semantic_search_skill.embedding import _normalize_input, _retry_delay
+from semantic_search_skill.embedding import _normalize_input, _retry_delay, estimate_embedding_input_chars
 
 
 def test_retry_delay_uses_retry_after_header() -> None:
@@ -15,3 +15,7 @@ def test_retry_delay_falls_back_to_exponential_backoff() -> None:
 
 def test_normalize_input_replaces_newlines_and_clamps_length() -> None:
     assert _normalize_input("a\nb\n" + "c" * 20, max_chars=5) == "a b c"
+
+
+def test_estimate_embedding_input_chars_uses_normalized_inputs() -> None:
+    assert estimate_embedding_input_chars(["a\nb", "c" * 10], max_chars=4) == 7
