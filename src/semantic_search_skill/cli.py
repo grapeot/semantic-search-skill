@@ -31,6 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
     query.add_argument("--cache-dir", default=None)
     query.add_argument("--workers", type=int, default=64)
     query.add_argument("--batch-size", type=int, default=128)
+    query.add_argument("--file-batch-size", type=int, default=2000)
     query.add_argument("--no-refresh", action="store_true", help="Do not index changed files before querying")
     query.add_argument("--counter", action="store_true", default=None, help="Enable counter event for this run")
 
@@ -39,6 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
     rebuild.add_argument("--cache-dir", default=None)
     rebuild.add_argument("--workers", type=int, default=64)
     rebuild.add_argument("--batch-size", type=int, default=128)
+    rebuild.add_argument("--file-batch-size", type=int, default=2000)
     rebuild.add_argument("--counter", action="store_true", default=None, help="Enable counter event for this run")
 
     doctor = subparsers.add_parser("doctor", help="Validate cache health")
@@ -140,9 +142,33 @@ def run_stats(args: argparse.Namespace) -> int:
 
 
 def refresh_index(index: SemanticIndex, file_paths: list[str], args: argparse.Namespace) -> dict[str, int]:
+    totals = {"files_scanned": len(file_paths), "files_updated": 0, "chunks_added": 0, "embedding_requests": 0}
+    file_batch_size = max(1, int(getattr(args, "file_batch_size", 2000)))
+    for start in range(0, len(file_paths), file_batch_size):
+        batch = file_paths[start : start + file_batch_size]
+        event = refresh_index_batch(index, batch, args)
+        totals["files_updated"] += event["files_updated"]
+        totals["chunks_added"] += event["chunks_added"]
+        totals["embedding_requests"] += event["embedding_requests"]
+        print(
+            json.dumps(
+                {
+                    "progress": True,
+                    "files_seen": min(start + len(batch), len(file_paths)),
+                    "files_total": len(file_paths),
+                    **event,
+                },
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+    return totals
+
+
+def refresh_index_batch(index: SemanticIndex, file_paths: list[str], args: argparse.Namespace) -> dict[str, int]:
     changed = index.changed_files(file_paths)
     if not changed:
-        return {"files_scanned": len(file_paths), "files_updated": 0, "chunks_added": 0, "embedding_requests": 0}
+        return {"files_updated": 0, "chunks_added": 0, "embedding_requests": 0}
     chunker = MarkdownChunker()
     chunks = []
     for file_path in changed:
@@ -156,7 +182,6 @@ def refresh_index(index: SemanticIndex, file_paths: list[str], args: argparse.Na
         embeddings = np.empty((0, index.config.dimension or 0), dtype=np.float32)
     index.replace_files(chunks, embeddings, changed)
     return {
-        "files_scanned": len(file_paths),
         "files_updated": len(changed),
         "chunks_added": len(chunks),
         "embedding_requests": requests,
