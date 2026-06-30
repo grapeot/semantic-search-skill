@@ -29,5 +29,7 @@ def test_refresh_index_saves_incremental_batches(tmp_path, monkeypatch) -> None:
     assert event["files_scanned"] == 3
     assert event["files_updated"] == 3
     assert event["chunks_added"] == 3
+    assert event["estimated_embedding_tokens"] > 0
+    assert event["estimated_embedding_cost_usd"] >= 0
     assert index.embeddings is not None
     assert np.asarray(index.embeddings).shape == (3, 2)

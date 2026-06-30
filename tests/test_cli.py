@@ -1,6 +1,6 @@
 import numpy as np
 
-from semantic_search_skill.cli import build_parser, rank
+from semantic_search_skill.cli import build_parser, estimate_rate_per_minute, rank
 from semantic_search_skill.models import Chunk
 
 
@@ -31,3 +31,8 @@ def test_rank_returns_highest_cosine_similarity() -> None:
     results = rank(chunks, np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32), np.asarray([0.0, 1.0], dtype=np.float32), 1)
 
     assert results[0].chunk.id == "b:0"
+
+
+def test_estimate_rate_per_minute() -> None:
+    assert estimate_rate_per_minute(120, 60) == 120
+    assert estimate_rate_per_minute(120, 0) == 0

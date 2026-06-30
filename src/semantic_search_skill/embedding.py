@@ -79,3 +79,7 @@ def _normalize_input(text: str, max_chars: int) -> str:
     if len(normalized) <= max_chars:
         return normalized
     return normalized[:max_chars]
+
+
+def estimate_embedding_input_chars(texts: list[str], max_chars: int = DEFAULT_MAX_INPUT_CHARS) -> int:
+    return sum(len(_normalize_input(text, max_chars)) for text in texts)

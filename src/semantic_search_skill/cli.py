@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -11,7 +12,7 @@ from dotenv import load_dotenv
 
 from .chunker import MarkdownChunker, read_text_file
 from .counter import append_counter_event, counter_enabled, counter_path
-from .embedding import DEFAULT_MODEL, DEFAULT_PROVIDER, EmbeddingClient
+from .embedding import DEFAULT_MODEL, DEFAULT_PROVIDER, EmbeddingClient, estimate_embedding_input_chars
 from .index import CacheConfig, CacheError, SemanticIndex
 from .models import SearchResult
 
@@ -75,7 +76,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def cache_dir_from_args(args: argparse.Namespace) -> Path:
-    value = args.cache_dir or os.environ.get("SEMANTIC_SEARCH_CACHE_DIR") or ".knowledge_cache"
+    value = getattr(args, "cache_dir", None) or os.environ.get("SEMANTIC_SEARCH_CACHE_DIR") or ".knowledge_cache"
     return Path(value)
 
 
@@ -142,26 +143,40 @@ def run_stats(args: argparse.Namespace) -> int:
 
 
 def refresh_index(index: SemanticIndex, file_paths: list[str], args: argparse.Namespace) -> dict[str, int]:
-    totals = {"files_scanned": len(file_paths), "files_updated": 0, "chunks_added": 0, "embedding_requests": 0}
+    totals = {
+        "files_scanned": len(file_paths),
+        "files_updated": 0,
+        "chunks_added": 0,
+        "embedding_requests": 0,
+        "embedding_input_chars": 0,
+        "estimated_embedding_tokens": 0,
+        "estimated_embedding_cost_usd": 0.0,
+    }
     file_batch_size = max(1, int(getattr(args, "file_batch_size", 2000)))
+    cache_dir = cache_dir_from_args(args)
     for start in range(0, len(file_paths), file_batch_size):
         batch = file_paths[start : start + file_batch_size]
+        batch_started = time.monotonic()
         event = refresh_index_batch(index, batch, args)
+        duration_s = round(time.monotonic() - batch_started, 3)
+        event["duration_s"] = duration_s
+        event["estimated_tokens_per_minute"] = estimate_rate_per_minute(event["estimated_embedding_tokens"], duration_s)
         totals["files_updated"] += event["files_updated"]
         totals["chunks_added"] += event["chunks_added"]
         totals["embedding_requests"] += event["embedding_requests"]
-        print(
-            json.dumps(
-                {
-                    "progress": True,
-                    "files_seen": min(start + len(batch), len(file_paths)),
-                    "files_total": len(file_paths),
-                    **event,
-                },
-                ensure_ascii=False,
-            ),
-            file=sys.stderr,
-        )
+        totals["embedding_input_chars"] += event["embedding_input_chars"]
+        totals["estimated_embedding_tokens"] += event["estimated_embedding_tokens"]
+        totals["estimated_embedding_cost_usd"] += event["estimated_embedding_cost_usd"]
+        progress_event = {
+            "command": getattr(args, "command", "refresh"),
+            "progress": True,
+            "files_seen": min(start + len(batch), len(file_paths)),
+            "files_total": len(file_paths),
+            **event,
+        }
+        if counter_enabled(True if getattr(args, "counter", None) else None):
+            append_counter_event(counter_path(cache_dir), progress_event)
+        print(json.dumps(progress_event, ensure_ascii=False), file=sys.stderr)
     return totals
 
 
@@ -175,16 +190,23 @@ def refresh_index_batch(index: SemanticIndex, file_paths: list[str], args: argpa
         chunks.extend(chunker.chunk(file_path, read_text_file(file_path)))
     if chunks:
         embedder = EmbeddingClient(model=index.config.model, base_url=args.base_url)
-        vectors, requests = embedder.embed_batches_parallel([chunk.text for chunk in chunks], args.batch_size, args.workers)
+        texts = [chunk.text for chunk in chunks]
+        input_chars = estimate_embedding_input_chars(texts)
+        vectors, requests = embedder.embed_batches_parallel(texts, args.batch_size, args.workers)
         embeddings = np.asarray(vectors, dtype=np.float32)
     else:
         requests = 0
+        input_chars = 0
         embeddings = np.empty((0, index.config.dimension or 0), dtype=np.float32)
+    estimated_tokens = estimate_tokens(input_chars)
     index.replace_files(chunks, embeddings, changed)
     return {
         "files_updated": len(changed),
         "chunks_added": len(chunks),
         "embedding_requests": requests,
+        "embedding_input_chars": input_chars,
+        "estimated_embedding_tokens": estimated_tokens,
+        "estimated_embedding_cost_usd": estimate_embedding_cost_usd(estimated_tokens),
     }
 
 
@@ -203,6 +225,21 @@ def maybe_write_counter(args: argparse.Namespace, cache_dir: Path, event: dict) 
     explicit = True if getattr(args, "counter", None) else None
     if counter_enabled(explicit):
         append_counter_event(counter_path(cache_dir), event)
+
+
+def estimate_tokens(chars: int) -> int:
+    return int((chars + 3) // 4)
+
+
+def estimate_embedding_cost_usd(tokens: int) -> float:
+    price = float(os.environ.get("SEMANTIC_SEARCH_EMBEDDING_USD_PER_1M_TOKENS", "0.02"))
+    return round(tokens / 1_000_000 * price, 6)
+
+
+def estimate_rate_per_minute(tokens: int, duration_s: float) -> int:
+    if duration_s <= 0:
+        return 0
+    return int(tokens / duration_s * 60)
 
 
 if __name__ == "__main__":
