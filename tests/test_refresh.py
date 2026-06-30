@@ -33,3 +33,19 @@ def test_refresh_index_saves_incremental_batches(tmp_path, monkeypatch) -> None:
     assert event["estimated_embedding_cost_usd"] >= 0
     assert index.embeddings is not None
     assert np.asarray(index.embeddings).shape == (3, 2)
+
+
+def test_refresh_index_handles_unchanged_batches(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "note.md"
+    path.write_text("# Note\nhello", encoding="utf-8")
+    monkeypatch.setattr(cli, "EmbeddingClient", FakeEmbedder)
+    index = SemanticIndex(tmp_path / "cache", CacheConfig(provider="openai", model="text-embedding-3-small"))
+    args = SimpleNamespace(batch_size=16, workers=1, base_url=None, file_batch_size=1)
+
+    _ = cli.refresh_index(index, [str(path)], args)
+    event = cli.refresh_index(index, [str(path)], args)
+
+    assert event["files_scanned"] == 1
+    assert event["files_updated"] == 0
+    assert event["estimated_embedding_tokens"] == 0
+    assert event["estimated_embedding_cost_usd"] == 0.0

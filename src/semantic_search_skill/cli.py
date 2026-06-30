@@ -183,7 +183,7 @@ def refresh_index(index: SemanticIndex, file_paths: list[str], args: argparse.Na
 def refresh_index_batch(index: SemanticIndex, file_paths: list[str], args: argparse.Namespace) -> dict[str, int]:
     changed = index.changed_files(file_paths)
     if not changed:
-        return {"files_updated": 0, "chunks_added": 0, "embedding_requests": 0}
+        return empty_refresh_event()
     chunker = MarkdownChunker()
     chunks = []
     for file_path in changed:
@@ -240,6 +240,17 @@ def estimate_rate_per_minute(tokens: int, duration_s: float) -> int:
     if duration_s <= 0:
         return 0
     return int(tokens / duration_s * 60)
+
+
+def empty_refresh_event() -> dict[str, int | float]:
+    return {
+        "files_updated": 0,
+        "chunks_added": 0,
+        "embedding_requests": 0,
+        "embedding_input_chars": 0,
+        "estimated_embedding_tokens": 0,
+        "estimated_embedding_cost_usd": 0.0,
+    }
 
 
 if __name__ == "__main__":
