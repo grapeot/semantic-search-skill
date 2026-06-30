@@ -1,0 +1,35 @@
+[project]
+name = "semantic-search-skill"
+version = "0.1.0"
+description = "AI-first semantic search CLI skill with stable local embedding cache"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "numpy>=1.26,<3",
+    "openai>=1.0,<3",
+    "python-dotenv>=1.0,<2",
+    "tqdm>=4.66,<5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0,<9",
+    "ruff>=0.4,<1",
+]
+
+[project.scripts]
+semantic-search = "semantic_search_skill.cli:main"
+semantic-search-warmup = "semantic_search_skill.warmup:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+markers = [
+    "live_integration: tests that call a real embedding provider and are skipped by default",
+]
