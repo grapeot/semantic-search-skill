@@ -11,7 +11,7 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI, 
 
 DEFAULT_MODEL = "text-embedding-3-small"
 DEFAULT_PROVIDER = "openai"
-DEFAULT_MAX_INPUT_CHARS = 12000
+DEFAULT_MAX_INPUT_CHARS = 3000
 
 
 class EmbeddingClient:
