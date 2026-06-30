@@ -11,6 +11,7 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI, 
 
 DEFAULT_MODEL = "text-embedding-3-small"
 DEFAULT_PROVIDER = "openai"
+DEFAULT_MAX_INPUT_CHARS = 12000
 
 
 class EmbeddingClient:
@@ -20,13 +21,15 @@ class EmbeddingClient:
         api_key: str | None = None,
         base_url: str | None = None,
         max_retries: int = 8,
+        max_input_chars: int = DEFAULT_MAX_INPUT_CHARS,
     ) -> None:
         self.model = model
         self.client = OpenAI(api_key=api_key or os.environ.get("OPENAI_API_KEY"), base_url=base_url)
         self.max_retries = max_retries
+        self.max_input_chars = max_input_chars
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        normalized = [text.replace("\n", " ") for text in texts]
+        normalized = [_normalize_input(text, self.max_input_chars) for text in texts]
         for attempt in range(self.max_retries + 1):
             try:
                 response = self.client.embeddings.create(input=normalized, model=self.model)
@@ -69,3 +72,10 @@ def _retry_delay(exc: Exception, attempt: int) -> float:
             except ValueError:
                 pass
     return min(0.5 * (2**attempt), 30.0)
+
+
+def _normalize_input(text: str, max_chars: int) -> str:
+    normalized = text.replace("\n", " ").strip()
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[:max_chars]
