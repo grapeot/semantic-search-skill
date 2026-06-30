@@ -60,6 +60,6 @@ Fake `op://your-vault/...` examples are allowed. Real vault paths are not.
 
 - Scaffold: complete.
 - GitHub repo: pending.
-- Implementation: pending.
+- Implementation: initial CLI and cache contract complete on feature branch.
 - Workspace migration: pending.
 - Cache rebuild: pending.
