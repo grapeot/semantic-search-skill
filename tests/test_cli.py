@@ -33,6 +33,23 @@ def test_rank_returns_highest_cosine_similarity() -> None:
     assert results[0].chunk.id == "b:0"
 
 
+def test_rank_ignores_nonfinite_embedding_values() -> None:
+    chunks = [
+        Chunk(id="bad:0", source_file="bad", text="bad"),
+        Chunk(id="good:0", source_file="good", text="good"),
+    ]
+
+    results = rank(
+        chunks,
+        np.asarray([[np.nan, np.nan], [0.0, 1.0]], dtype=np.float32),
+        np.asarray([0.0, 1.0], dtype=np.float32),
+        2,
+    )
+
+    assert results[0].chunk.id == "good:0"
+    assert all(np.isfinite(result.score) for result in results)
+
+
 def test_estimate_rate_per_minute() -> None:
     assert estimate_rate_per_minute(120, 60) == 120
     assert estimate_rate_per_minute(120, 0) == 0

@@ -8,17 +8,17 @@ Promote the old workspace-local `tools/semantic_search` into a standalone public
 
 - Keep the global workspace cache path as `.knowledge_cache`, but rebuild it with the new cache schema.
 - Before rebuild, rename the old cache directory instead of deleting it immediately.
-- Use OpenAI `text-embedding-3-small` by default.
+- Use the local OpenAI-compatible Qwen endpoint for the workspace rebuild and scheduled refreshes. Paid OpenAI embedding should only be used when explicitly authorized.
 - Put private workspace defaults in the overlay skill, not in the public repo.
 - Enable the global counter during onboarding to observe rebuild behavior and prevent accidental rebuild loops.
-- After tests pass, delete the old cache backup and old `tools/semantic_search` implementation.
+- After tests pass, keep old cache backups temporarily and delete the old `tools/semantic_search` implementation.
 
 ## Dependency Inventory To Migrate
 
 - `rules/skills/semantic_search.md`: become private overlay pointing to the standalone skill and defining workspace defaults.
 - `rules/skills/INDEX.md`: update the semantic search entry.
 - `rules/skills/opencode_sessions_archive.md`: update AI sessions semantic index instructions.
-- `contexts/ai_sessions/scripts/sync_sessions.sh`: switch cron indexing to the new CLI and OpenAI config.
+- `contexts/ai_sessions/scripts/sync_sessions.sh`: switch cron indexing to the new CLI and local Qwen config.
 - `periodic_jobs/backup_utility/scripts/borg_backup_knowledge_working.sh`: keep excluding `.knowledge_cache`.
 - `tools/semantic_search/`: delete after migration, not wrap.
 - `.knowledge_cache/`: rename old directory, rebuild in place, verify, then remove old backup.
@@ -39,8 +39,8 @@ Promote the old workspace-local `tools/semantic_search` into a standalone public
 
 1. Stop writers to `.knowledge_cache` if any are running.
 2. Rename `.knowledge_cache` to a timestamped backup.
-3. Create a private `.env` for the standalone skill with `OPENAI_API_KEY` and `SEMANTIC_SEARCH_CACHE_DIR=.knowledge_cache`.
-4. Run rebuild through `op run --env-file=.env -- semantic-search rebuild ...` with high concurrency, initially `--workers 64` unless rate limits require lower concurrency.
+3. Create or reuse a private `.env` for the standalone skill if credentials are needed; workspace-specific endpoints and model names belong in the private overlay.
+4. Run rebuild through a background process manager after a short timed validation run; choose `--base-url`, `--model`, `--workers`, and `--batch-size` from the private overlay's tested settings. Global CLI options such as `--base-url` and `--model` must be placed before the `rebuild` or `query` subcommand.
 5. Run `semantic-search doctor` and representative queries.
 6. Run the migrated AI sessions sync manually.
 7. Check `counter.jsonl` for repeated full rebuilds or unexpectedly high API request counts.
@@ -59,7 +59,7 @@ Fake `op://your-vault/...` examples are allowed. Real vault paths are not.
 ## Current Status
 
 - Scaffold: complete.
-- GitHub repo: pending.
-- Implementation: initial CLI and cache contract complete on feature branch.
-- Workspace migration: pending.
-- Cache rebuild: pending.
+- GitHub repo: complete at `https://github.com/grapeot/semantic-search-skill`.
+- Implementation: merged through the cache/counter migration PRs.
+- Workspace migration: active clients migrated to the standalone CLI; old `tools/semantic_search` implementation deleted from the parent workspace.
+- Cache rebuild: complete. `.knowledge_cache` now uses Qwen 4096-dimension embeddings and passed `doctor` plus smoke query validation.

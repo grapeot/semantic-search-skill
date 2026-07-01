@@ -211,6 +211,8 @@ def refresh_index_batch(index: SemanticIndex, file_paths: list[str], args: argpa
 
 
 def rank(chunks: list, embeddings: np.ndarray, query_vector: np.ndarray, top_k: int) -> list[SearchResult]:
+    embeddings = np.nan_to_num(embeddings, nan=0.0, posinf=0.0, neginf=0.0)
+    query_vector = np.nan_to_num(query_vector, nan=0.0, posinf=0.0, neginf=0.0)
     norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
     norms[norms == 0] = 1.0
     normalized = embeddings / norms

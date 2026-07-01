@@ -9,7 +9,13 @@
 - Tightened embedding input clamping after live workspace rebuild exposed very long chunks that exceeded OpenAI per-input limits.
 - Changed `.env.example` to avoid a fixed relative counter path; relative paths depend on the caller's cwd and can accidentally write counters outside the intended cache directory.
 
+### 2026-07-01
+
+- Completed a full workspace rebuild against the local Qwen OpenAI-compatible endpoint. The rebuilt `.knowledge_cache` contains 1,980,682 chunks with 4096-dimension embeddings.
+- Added defensive ranking normalization for non-finite embedding values after a live smoke query found two Qwen responses that produced `NaN` scores.
+
 ## Lessons Learned
 
 - The old workspace cache failed through a truncated pickle file. The new public cache contract must avoid pickle metadata and use atomic writes.
 - Privacy scan examples can self-match if they contain literal private patterns; write them as shell-concatenated patterns so the command still works without polluting scan output.
+- Live embedding providers can return pathological vectors even when the batch request succeeds. Ranking should sanitize `NaN`/`Inf` defensively so a few bad vectors cannot dominate search results.
