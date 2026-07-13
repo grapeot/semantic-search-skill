@@ -8,6 +8,9 @@
 - `doctor` detects missing files, schema mismatch, model mismatch, and row-count mismatch.
 - CLI argument parsing supports `query`, `rebuild`, `stats`, and `doctor`.
 - Counter writes no private document content.
+- Cache lock acquisition reports waiting and acquired states on stderr.
+- Acquiring the cache lock removes abandoned semantic-search write directories.
+- An interruption during multi-file commit restores the previous complete cache.
 
 ## Smoke Tests
 

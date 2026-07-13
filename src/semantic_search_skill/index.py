@@ -2,17 +2,24 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import sys
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator, TextIO
 
 import numpy as np
+from filelock import FileLock
 
 from .models import Chunk
 
 SCHEMA_VERSION = 1
+WRITE_TMP_PREFIX = ".semantic-search-write-"
+BACKUP_TMP_PREFIX = ".semantic-search-backup-"
+CACHE_FILES = ("cache.json", "manifest.json", "chunks.jsonl", "embeddings.npy")
 
 
 class CacheError(RuntimeError):
@@ -42,6 +49,52 @@ class SemanticIndex:
 
     def exists(self) -> bool:
         return self.cache_path.exists() or self.chunks_path.exists() or self.embeddings_path.exists()
+
+    @contextmanager
+    def lock(self, status_stream: TextIO | None = None) -> Iterator[None]:
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        stream = status_stream or sys.stderr
+        print(f"Waiting to acquire cache lock: {self.lock_path}", file=stream, flush=True)
+        with FileLock(self.lock_path):
+            print(f"Acquired cache lock: {self.lock_path}", file=stream, flush=True)
+            self._recover_interrupted_write()
+            self._cleanup_abandoned_writes()
+            yield
+
+    def _cleanup_abandoned_writes(self) -> None:
+        for prefix in (WRITE_TMP_PREFIX, BACKUP_TMP_PREFIX):
+            for path in self.cache_dir.glob(f"{prefix}*"):
+                if path.is_dir():
+                    shutil.rmtree(path)
+
+    @property
+    def transaction_path(self) -> Path:
+        return self.cache_dir / "write_transaction.json"
+
+    def _recover_interrupted_write(self) -> None:
+        if not self.transaction_path.exists():
+            return
+        transaction = json.loads(self.transaction_path.read_text(encoding="utf-8"))
+        backup_name = transaction.get("backup_dir", "")
+        if Path(backup_name).name != backup_name or not backup_name.startswith(BACKUP_TMP_PREFIX):
+            raise CacheError("invalid cache write transaction backup path")
+        existing_files = set(transaction.get("existing_files", []))
+        if not existing_files.issubset(CACHE_FILES):
+            raise CacheError("invalid cache write transaction file list")
+        backup_dir = self.cache_dir / backup_name
+        for name in CACHE_FILES:
+            target = self.cache_dir / name
+            backup = backup_dir / name
+            if name in existing_files:
+                if backup.exists():
+                    target.unlink(missing_ok=True)
+                    os.replace(backup, target)
+            else:
+                target.unlink(missing_ok=True)
+        self.transaction_path.unlink()
+        _fsync_dir(self.cache_dir)
+        if backup_dir.exists():
+            shutil.rmtree(backup_dir)
 
     def load(self, *, mmap: bool = True, require_exists: bool = False) -> None:
         if not self.cache_path.exists():
@@ -136,7 +189,7 @@ class SemanticIndex:
             "updated_at": now,
             "chunk_count": len(self.chunks),
         }
-        with tempfile.TemporaryDirectory(dir=self.cache_dir) as tmp_name:
+        with tempfile.TemporaryDirectory(prefix=WRITE_TMP_PREFIX, dir=self.cache_dir) as tmp_name:
             tmp = Path(tmp_name)
             _write_json(tmp / "cache.json", self.meta)
             _write_json(tmp / "manifest.json", self.manifest)
@@ -150,10 +203,32 @@ class SemanticIndex:
             else:
                 np.save(tmp / "embeddings.npy", np.asarray(self.embeddings, dtype=np.float32))
             _fsync_file(tmp / "embeddings.npy")
-            for name in ("cache.json", "manifest.json", "chunks.jsonl", "embeddings.npy"):
-                os.replace(tmp / name, self.cache_dir / name)
+            backup_dir = Path(tempfile.mkdtemp(prefix=BACKUP_TMP_PREFIX, dir=self.cache_dir))
+            existing_files = [name for name in CACHE_FILES if (self.cache_dir / name).exists()]
+            staged_transaction = tmp / "write_transaction.json"
+            _write_json(
+                staged_transaction,
+                {"backup_dir": backup_dir.name, "existing_files": existing_files},
+            )
+            os.replace(staged_transaction, self.transaction_path)
             _fsync_dir(self.cache_dir)
+            try:
+                self._commit_staged_files(tmp, backup_dir)
+                _fsync_dir(self.cache_dir)
+                self.transaction_path.unlink()
+                _fsync_dir(self.cache_dir)
+                shutil.rmtree(backup_dir)
+            except BaseException:
+                self._recover_interrupted_write()
+                raise
         self.load(mmap=True)
+
+    def _commit_staged_files(self, staged_dir: Path, backup_dir: Path) -> None:
+        for name in CACHE_FILES:
+            target = self.cache_dir / name
+            if target.exists():
+                os.replace(target, backup_dir / name)
+            os.replace(staged_dir / name, target)
 
     def subset(self, file_paths: list[str]) -> tuple[list[Chunk], np.ndarray]:
         if self.embeddings is None:

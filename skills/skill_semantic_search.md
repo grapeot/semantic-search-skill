@@ -51,6 +51,8 @@ semantic-search stats --cache-dir .knowledge_cache
 
 The cache stores chunk metadata as JSONL and vectors as one `float32` NumPy matrix. The metadata records schema version, provider, model, and embedding dimension. If these do not match the current embedding configuration, rebuild explicitly instead of mixing caches.
 
+Every CLI command acquires the cache lock before reading or refreshing the index. A process waiting behind another writer reports `Waiting to acquire cache lock` on stderr; do not treat that message as a hang or start a competing rebuild.
+
 ## Workspace Overlays
 
 This public skill does not prescribe private source directories. A workspace overlay should define common file-list generation commands, the preferred cache directory, and any local cron or launcher integration.

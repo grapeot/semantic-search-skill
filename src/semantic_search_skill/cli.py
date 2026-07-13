@@ -96,8 +96,9 @@ def run_rebuild(args: argparse.Namespace) -> int:
     cache_dir = cache_dir_from_args(args)
     config = config_from_args(args)
     index = SemanticIndex(cache_dir, config)
-    index.load(require_exists=False)
-    event = refresh_index(index, file_paths, args)
+    with index.lock():
+        index.load(require_exists=False)
+        event = refresh_index(index, file_paths, args)
     event["command"] = "rebuild"
     maybe_write_counter(args, cache_dir, event)
     print(json.dumps({"ok": True, **event, "cache_dir": str(cache_dir)}, ensure_ascii=False, indent=2))
@@ -109,13 +110,12 @@ def run_query(args: argparse.Namespace) -> int:
     cache_dir = cache_dir_from_args(args)
     config = config_from_args(args)
     index = SemanticIndex(cache_dir, config)
-    index.load(require_exists=False)
-    event = {"files_scanned": len(file_paths), "files_updated": 0, "chunks_added": 0, "embedding_requests": 0}
-    if not args.no_refresh:
-        event = refresh_index(index, file_paths, args)
-    else:
-        index.load(require_exists=True)
-    chunks, embeddings = index.subset(file_paths)
+    with index.lock():
+        index.load(require_exists=args.no_refresh)
+        event = {"files_scanned": len(file_paths), "files_updated": 0, "chunks_added": 0, "embedding_requests": 0}
+        if not args.no_refresh:
+            event = refresh_index(index, file_paths, args)
+        chunks, embeddings = index.subset(file_paths)
     if not chunks or embeddings.size == 0:
         print(json.dumps([], ensure_ascii=False))
         return 0
@@ -130,15 +130,19 @@ def run_query(args: argparse.Namespace) -> int:
 
 def run_doctor(args: argparse.Namespace) -> int:
     index = SemanticIndex(cache_dir_from_args(args), config_from_args(args))
-    index.load(require_exists=True)
-    print(json.dumps({"ok": True, "stats": index.stats()}, ensure_ascii=False, indent=2))
+    with index.lock():
+        index.load(require_exists=True)
+        stats = index.stats()
+    print(json.dumps({"ok": True, "stats": stats}, ensure_ascii=False, indent=2))
     return 0
 
 
 def run_stats(args: argparse.Namespace) -> int:
     index = SemanticIndex(cache_dir_from_args(args), config_from_args(args))
-    index.load(require_exists=True)
-    print(json.dumps(index.stats(), ensure_ascii=False, indent=2))
+    with index.lock():
+        index.load(require_exists=True)
+        stats = index.stats()
+    print(json.dumps(stats, ensure_ascii=False, indent=2))
     return 0
 
 

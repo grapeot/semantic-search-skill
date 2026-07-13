@@ -14,6 +14,12 @@
 - Completed a full workspace rebuild against the local Qwen OpenAI-compatible endpoint. The rebuilt `.knowledge_cache` contains 1,980,682 chunks with 4096-dimension embeddings.
 - Added defensive ranking normalization for non-finite embedding values after a live smoke query found two Qwen responses that produced `NaN` scores.
 
+### 2026-07-13
+
+- Serialized CLI cache access with a cross-platform file lock and explicit stderr wait/acquired messages.
+- Added cleanup for interrupted atomic-write directories after a lock holder exits unexpectedly.
+- Added transaction-marker recovery so interruption during the multi-file commit restores the previous complete cache.
+
 ## Lessons Learned
 
 - The old workspace cache failed through a truncated pickle file. The new public cache contract must avoid pickle metadata and use atomic writes.
