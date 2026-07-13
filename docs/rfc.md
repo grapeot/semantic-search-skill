@@ -7,8 +7,9 @@
 3. Credentials are resolved before Python starts. Users may set `OPENAI_API_KEY` directly or store an `op://...` reference in `.env` and run commands through `op run --env-file=.env -- ...`.
 4. The default cache path is configurable by `SEMANTIC_SEARCH_CACHE_DIR`; a workspace overlay may set it to `.knowledge_cache` so global knowledge search stays fast.
 5. The new cache format replaces pickle-based chunks with JSONL metadata plus a single `.npy` embedding matrix. Embeddings are not duplicated in chunk metadata.
-6. Cache writes are atomic and versioned. Failed writes must not masquerade as valid cache state.
+6. Cache writes are transactional and versioned. An atomically published transaction marker and rollback copy preserve the previous complete cache if a process stops during the multi-file commit.
 7. The implementation should expose an opt-in global counter for onboarding/debugging. When enabled, it appends JSONL events with timestamps, files scanned, files updated, chunks added, embedding requests, and rebuild reason.
+8. CLI cache access is serialized with `index.lock`. Lock contention is reported on stderr before blocking so agents can distinguish waiting from a stalled process.
 
 ## Cache Layout
 
@@ -59,6 +60,8 @@ The old cache used pickle because loading Python objects is convenient, but it m
 - If cache metadata and embedding rows disagree, fail with a clear diagnostic.
 - If cache schema/model/dimension does not match the requested embedding config, require `--rebuild` or a separate cache directory.
 - If a write fails, leave the previous cache intact.
+- If a process stops during commit, the next lock holder rolls the incomplete transaction back before loading the cache.
+- Clean abandoned semantic-search write directories after acquiring the cache lock.
 - Do not silently rebuild forever. Rebuild must be explicit or caused by a missing cache.
 
 ## Counter Feature
