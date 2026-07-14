@@ -2,6 +2,8 @@
 
 Public-ready semantic search for AI agents. The CLI indexes local text files, stores embeddings in a reusable on-disk cache, and returns stable JSON results for natural-language queries.
 
+The current cache format is v2: one logical global index per cache directory, backed by a single SQLite metadata database plus append-only normalized `float32` NumPy segment files. Segments are physical shards of the same index, not separate per-corpus indexes.
+
 ## Install
 
 ```bash
@@ -28,6 +30,43 @@ semantic-search query \
 ```
 
 The default embedding model is `text-embedding-3-small`. The default cache directory can be set with `SEMANTIC_SEARCH_CACHE_DIR`.
+
+`query` refreshes changed files by default. Use `--no-refresh` to perform a pure read against the existing cache. Query reads never acquire a file lock; SQLite WAL provides snapshot isolation. Segment publication, migration, and orphan cleanup share a writer-only lock so physical files cannot race with maintenance.
+
+## Cache Operations
+
+```bash
+semantic-search rebuild --file-list tmp/files.txt --cache-dir .knowledge_cache
+semantic-search doctor --cache-dir .knowledge_cache
+semantic-search stats --cache-dir .knowledge_cache
+```
+
+`doctor` reports missing or corrupt segment files, orphan segment files, abandoned temp files, inactive chunks, and whether compaction would reclaim space. It does not compact by default. Use `doctor --cleanup-orphans` only to remove segment files that are not referenced by SQLite metadata and abandoned temp files.
+
+Updates and source deletion make old chunks inactive but do not physically erase their text or vectors. If secure deletion matters, rebuild or remove the cache; `--cleanup-orphans` is not a purge operation.
+
+## Migrating v1 Caches
+
+v1 `cache.json` + `manifest.json` + `chunks.jsonl` + `embeddings.npy` caches are real persisted data. They are not auto-deleted and are not automatically upgraded during query or rebuild.
+
+Run an explicit streaming migration:
+
+```bash
+semantic-search migrate-v1 \
+  --v1-cache-dir old-cache \
+  --cache-dir .knowledge_cache \
+  --segment-size 50000
+```
+
+The migration reads `chunks.jsonl` line by line and memory-maps `embeddings.npy`, then atomically publishes the v2 SQLite database after segment files are safely written. If a process crashes before publish, rerun `migrate-v1`; leftover unreferenced segment files are reported by `doctor` and can be removed with `doctor --cleanup-orphans`.
+
+## Offline Benchmark
+
+```bash
+python scripts/benchmark_v2.py --files 200 --chunks-per-file 5 --dimension 64
+```
+
+The benchmark is pure synthetic, does not call an embedding provider, and prints JSON aggregate metrics only. It does not output source text, query text, or absolute paths.
 
 ## Agent Skill
 

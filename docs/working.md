@@ -16,12 +16,22 @@
 
 ### 2026-07-13
 
-- Serialized CLI cache access with a cross-platform file lock and explicit stderr wait/acquired messages.
-- Added cleanup for interrupted atomic-write directories after a lock holder exits unexpectedly.
-- Added transaction-marker recovery so interruption during the multi-file commit restores the previous complete cache.
+- Earlier v1 work serialized CLI cache access with a cross-platform file lock and transactional multi-file recovery.
+- The v2 storage work supersedes that approach for query/refresh paths by relying on SQLite WAL and short writer transactions.
+- Replaced v1 monolithic `chunks.jsonl` + `embeddings.npy` storage with v2 SQLite metadata and append-only normalized `float32` NPY segments.
+- Removed query-time file locking. Query now uses SQLite WAL snapshot reads, loads only matching file-list rows, and merges exact top-k across referenced segments.
+- Changed refresh so changed detection, chunking, and embedding happen outside the writer transaction; publishing is a short SQLite transaction that marks old chunks inactive and appends new segment row references.
+- Added explicit `migrate-v1`, preserving v1 files and streaming `chunks.jsonl` with mmap `embeddings.npy`.
+- Added `doctor` orphan reporting/cleanup and a synthetic offline `scripts/benchmark_v2.py` JSON benchmark.
+- Kept readers entirely lock-free while adding a writer-only lock shared by segment publication, migration, and orphan cleanup to close the physical-file race.
+- Removed query-time materialization of the global file manifest and deferred chunk text loading until after top-k vector scoring.
+- Preserved v1 manifest mtimes during migration so relative source paths are not incorrectly treated as changed when migration runs from another working directory.
+- Profiled a 2.62-million-chunk, 4096-dimension global cache. A representative 17,354-file no-change query fell from about 13m34s and 93.8 GB peak memory footprint on v1 to 45.68s and 557 MB on v2, while preserving the same leading results.
 
 ## Lessons Learned
 
 - The old workspace cache failed through a truncated pickle file. The new public cache contract must avoid pickle metadata and use atomic writes.
 - Privacy scan examples can self-match if they contain literal private patterns; write them as shell-concatenated patterns so the command still works without polluting scan output.
 - Live embedding providers can return pathological vectors even when the batch request succeeds. Ranking should sanitize `NaN`/`Inf` defensively so a few bad vectors cannot dominate search results.
+- Segment files should be treated as immutable publish artifacts. Query correctness comes from SQLite active metadata, so orphan physical files are safe but should be reported and cleaned explicitly.
+- Refresh must not publish chunks if a source file changes during read/embed; skipping that file for the current run is safer than indexing a stale snapshot over newer source content.

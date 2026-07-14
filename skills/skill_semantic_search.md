@@ -40,6 +40,17 @@ semantic-search query \
   --top-k 10
 ```
 
+Use `--no-refresh` when the task requires a pure read of the existing cache:
+
+```bash
+semantic-search query \
+  --file-list tmp/files.txt \
+  --cache-dir .knowledge_cache \
+  --query "natural-language question" \
+  --top-k 10 \
+  --no-refresh
+```
+
 Inspect cache health:
 
 ```bash
@@ -47,11 +58,25 @@ semantic-search doctor --cache-dir .knowledge_cache
 semantic-search stats --cache-dir .knowledge_cache
 ```
 
+Explicitly migrate a v1 cache:
+
+```bash
+semantic-search migrate-v1 --v1-cache-dir old-cache --cache-dir .knowledge_cache
+```
+
 ## Cache Contract
 
-The cache stores chunk metadata as JSONL and vectors as one `float32` NumPy matrix. The metadata records schema version, provider, model, and embedding dimension. If these do not match the current embedding configuration, rebuild explicitly instead of mixing caches.
+The v2 cache stores metadata in one SQLite database and vectors in append-only normalized `float32` NumPy segment files. Segments are physical shards of the same logical global index, not separate indexes.
 
-Every CLI command acquires the cache lock before reading or refreshing the index. A process waiting behind another writer reports `Waiting to acquire cache lock` on stderr; do not treat that message as a hang or start a competing rebuild.
+Query reads do not acquire a file lock. SQLite WAL snapshot isolation lets queries run while a writer prepares a refresh. Refresh computes changed chunks and embeddings first, then uses a writer-only lock and a short SQLite transaction to publish the segment safely. Migration and orphan cleanup use the same writer lock.
+
+Small updates append a new segment and mark old chunks inactive. Default query/rebuild refresh does not compact or rewrite old segments. Use `doctor` to inspect inactive chunks and orphan segment files; use `doctor --cleanup-orphans` only for unreferenced physical segment/temp files.
+
+Inactive chunks remain present on disk even though queries ignore them. Source deletion is not secure cache erasure; rebuild or remove the cache when physical deletion is required.
+
+If a cache still has v1 `cache.json` + `chunks.jsonl` + `embeddings.npy` files but no v2 `index.sqlite3`, run `migrate-v1` explicitly. The migration preserves v1 files and streams data instead of loading all chunks into memory.
+
+Counter events are aggregate operational metrics only. They must not include source paths, raw document text, query text, or absolute cache paths.
 
 ## Workspace Overlays
 
