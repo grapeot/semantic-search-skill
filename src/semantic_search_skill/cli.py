@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from .chunker import MarkdownChunker, read_text_file
 from .counter import append_counter_event, counter_enabled, counter_path
 from .embedding import DEFAULT_MODEL, DEFAULT_PROVIDER, EmbeddingClient, estimate_embedding_input_chars
-from .index import CacheConfig, CacheError, SemanticIndex
+from .index import CacheConfig, CacheError, FileState, SemanticIndex, file_state, migrate_v1_cache, normalize_query, normalize_vectors
 from .models import SearchResult
 
 
@@ -46,9 +46,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = subparsers.add_parser("doctor", help="Validate cache health")
     doctor.add_argument("--cache-dir", default=None)
+    doctor.add_argument("--cleanup-orphans", action="store_true", help="Remove abandoned temp files and segment files not referenced by SQLite metadata")
 
     stats = subparsers.add_parser("stats", help="Print cache statistics")
     stats.add_argument("--cache-dir", default=None)
+
+    migrate = subparsers.add_parser("migrate-v1", help="Explicitly migrate a v1 JSONL+NPY cache to the v2 SQLite+segments layout")
+    migrate.add_argument("--v1-cache-dir", required=True)
+    migrate.add_argument("--cache-dir", default=None, help="Target v2 cache directory; defaults like other commands")
+    migrate.add_argument("--segment-size", type=int, default=50000)
 
     return parser
 
@@ -69,6 +75,8 @@ def main(argv: list[str] | None = None) -> int:
             return run_doctor(args)
         if args.command == "stats":
             return run_stats(args)
+        if args.command == "migrate-v1":
+            return run_migrate_v1(args)
     except CacheError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 2
@@ -96,9 +104,7 @@ def run_rebuild(args: argparse.Namespace) -> int:
     cache_dir = cache_dir_from_args(args)
     config = config_from_args(args)
     index = SemanticIndex(cache_dir, config)
-    with index.lock():
-        index.load(require_exists=False)
-        event = refresh_index(index, file_paths, args)
+    event = refresh_index(index, file_paths, args)
     event["command"] = "rebuild"
     maybe_write_counter(args, cache_dir, event)
     print(json.dumps({"ok": True, **event, "cache_dir": str(cache_dir)}, ensure_ascii=False, indent=2))
@@ -110,18 +116,14 @@ def run_query(args: argparse.Namespace) -> int:
     cache_dir = cache_dir_from_args(args)
     config = config_from_args(args)
     index = SemanticIndex(cache_dir, config)
-    with index.lock():
-        index.load(require_exists=args.no_refresh)
+    if args.no_refresh:
+        index.load(require_exists=True)
         event = {"files_scanned": len(file_paths), "files_updated": 0, "chunks_added": 0, "embedding_requests": 0}
-        if not args.no_refresh:
-            event = refresh_index(index, file_paths, args)
-        chunks, embeddings = index.subset(file_paths)
-    if not chunks or embeddings.size == 0:
-        print(json.dumps([], ensure_ascii=False))
-        return 0
+    else:
+        event = refresh_index(index, file_paths, args)
     embedder = EmbeddingClient(model=config.model, base_url=args.base_url)
     query_vector = np.asarray(embedder.embed_batch([args.query])[0], dtype=np.float32)
-    results = rank(chunks, embeddings, query_vector, args.top_k)
+    results = index.search(file_paths, query_vector, args.top_k)
     event = {"command": "query", **event, "query_embedding_requests": 1, "result_count": len(results)}
     maybe_write_counter(args, cache_dir, event)
     print(json.dumps([result.to_dict() for result in results], ensure_ascii=False, indent=2))
@@ -130,18 +132,24 @@ def run_query(args: argparse.Namespace) -> int:
 
 def run_doctor(args: argparse.Namespace) -> int:
     index = SemanticIndex(cache_dir_from_args(args), config_from_args(args))
-    with index.lock():
-        index.load(require_exists=True)
-        stats = index.stats()
-    print(json.dumps({"ok": True, "stats": stats}, ensure_ascii=False, indent=2))
+    index.load(require_exists=True)
+    report = index.doctor(cleanup_orphans=args.cleanup_orphans)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0 if report["ok"] else 2
+
+
+def run_migrate_v1(args: argparse.Namespace) -> int:
+    cache_dir = cache_dir_from_args(args)
+    config = config_from_args(args)
+    event = migrate_v1_cache(args.v1_cache_dir, cache_dir, config, segment_size=args.segment_size)
+    print(json.dumps({"ok": True, **event}, ensure_ascii=False, indent=2))
     return 0
 
 
 def run_stats(args: argparse.Namespace) -> int:
     index = SemanticIndex(cache_dir_from_args(args), config_from_args(args))
-    with index.lock():
-        index.load(require_exists=True)
-        stats = index.stats()
+    index.load(require_exists=True)
+    stats = index.stats()
     print(json.dumps(stats, ensure_ascii=False, indent=2))
     return 0
 
@@ -150,6 +158,7 @@ def refresh_index(index: SemanticIndex, file_paths: list[str], args: argparse.Na
     totals = {
         "files_scanned": len(file_paths),
         "files_updated": 0,
+        "files_skipped_concurrent_updates": 0,
         "chunks_added": 0,
         "embedding_requests": 0,
         "embedding_input_chars": 0,
@@ -166,6 +175,7 @@ def refresh_index(index: SemanticIndex, file_paths: list[str], args: argparse.Na
         event["duration_s"] = duration_s
         event["estimated_tokens_per_minute"] = estimate_rate_per_minute(event["estimated_embedding_tokens"], duration_s)
         totals["files_updated"] += event["files_updated"]
+        totals["files_skipped_concurrent_updates"] += event.get("files_skipped_concurrent_updates", 0)
         totals["chunks_added"] += event["chunks_added"]
         totals["embedding_requests"] += event["embedding_requests"]
         totals["embedding_input_chars"] += event["embedding_input_chars"]
@@ -190,8 +200,23 @@ def refresh_index_batch(index: SemanticIndex, file_paths: list[str], args: argpa
         return empty_refresh_event()
     chunker = MarkdownChunker()
     chunks = []
+    file_states: dict[str, FileState] = {}
+    skipped_concurrent_updates = 0
     for file_path in changed:
-        chunks.extend(chunker.chunk(file_path, read_text_file(file_path)))
+        state = file_state(file_path)
+        file_states[file_path] = state
+        if not state.exists:
+            continue
+        try:
+            content = read_text_file(file_path)
+        except FileNotFoundError:
+            file_states[file_path] = FileState(exists=False)
+            continue
+        if file_state(file_path) != state:
+            skipped_concurrent_updates += 1
+            file_states.pop(file_path, None)
+            continue
+        chunks.extend(chunker.chunk(file_path, content))
     if chunks:
         embedder = EmbeddingClient(model=index.config.model, base_url=args.base_url)
         texts = [chunk.text for chunk in chunks]
@@ -202,11 +227,24 @@ def refresh_index_batch(index: SemanticIndex, file_paths: list[str], args: argpa
         requests = 0
         input_chars = 0
         embeddings = np.empty((0, index.config.dimension or 0), dtype=np.float32)
+    stable_files = {path for path, state in file_states.items() if file_state(path) == state}
+    skipped_concurrent_updates += len(file_states) - len(stable_files)
+    publish_chunks = [chunk for chunk in chunks if chunk.source_file in stable_files]
+    if len(publish_chunks) != len(chunks):
+        keep = [idx for idx, chunk in enumerate(chunks) if chunk.source_file in stable_files]
+        embeddings = embeddings[keep] if len(keep) else np.empty((0, embeddings.shape[1] if embeddings.ndim == 2 else index.config.dimension or 0), dtype=np.float32)
+    publish_files = [path for path in changed if path in stable_files]
+    publish_states = {path: file_states[path] for path in publish_files}
     estimated_tokens = estimate_tokens(input_chars)
-    index.replace_files(chunks, embeddings, changed)
+    skipped_at_publish = index.replace_files(publish_chunks, embeddings, publish_files, file_states=publish_states)
+    skipped_concurrent_updates += len(skipped_at_publish)
+    published_files = len(publish_files) - len(skipped_at_publish)
+    skipped_at_publish_set = set(skipped_at_publish)
+    published_chunks = sum(1 for chunk in publish_chunks if chunk.source_file not in skipped_at_publish_set)
     return {
-        "files_updated": len(changed),
-        "chunks_added": len(chunks),
+        "files_updated": published_files,
+        "files_skipped_concurrent_updates": skipped_concurrent_updates,
+        "chunks_added": published_chunks,
         "embedding_requests": requests,
         "embedding_input_chars": input_chars,
         "estimated_embedding_tokens": estimated_tokens,
@@ -215,15 +253,10 @@ def refresh_index_batch(index: SemanticIndex, file_paths: list[str], args: argpa
 
 
 def rank(chunks: list, embeddings: np.ndarray, query_vector: np.ndarray, top_k: int) -> list[SearchResult]:
-    embeddings = np.nan_to_num(embeddings, nan=0.0, posinf=0.0, neginf=0.0)
-    query_vector = np.nan_to_num(query_vector, nan=0.0, posinf=0.0, neginf=0.0)
-    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-    norms[norms == 0] = 1.0
-    normalized = embeddings / norms
-    query_norm = np.linalg.norm(query_vector)
-    normalized_query = query_vector / query_norm if query_norm else query_vector
+    normalized = normalize_vectors(embeddings)
+    normalized_query = normalize_query(query_vector)
     scores = normalized @ normalized_query
-    indices = np.argsort(scores)[-min(top_k, len(chunks)) :][::-1]
+    indices = np.lexsort((np.arange(len(chunks)), -scores))[: min(top_k, len(chunks))]
     return [SearchResult(chunk=chunks[index], score=float(scores[index])) for index in indices]
 
 
@@ -251,6 +284,7 @@ def estimate_rate_per_minute(tokens: int, duration_s: float) -> int:
 def empty_refresh_event() -> dict[str, int | float]:
     return {
         "files_updated": 0,
+        "files_skipped_concurrent_updates": 0,
         "chunks_added": 0,
         "embedding_requests": 0,
         "embedding_input_chars": 0,

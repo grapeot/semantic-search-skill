@@ -1,27 +1,21 @@
-# Migration: Workspace Tool to Standalone Public Skill
+# Migration: v1 to v2 Cache
 
 ## Intent
 
-Promote the old workspace-local `tools/semantic_search` into a standalone public skill and migrate all current workspace usage to the new package. The old implementation does not need compatibility wrappers; if something breaks, fix the new path directly.
+Migrate existing v1 JSONL+NPY caches to v2 SQLite metadata plus append-only NPY segments without deleting persisted data.
 
-## Workspace Decisions
+## Deployment Decisions
 
-- Keep the global workspace cache path as `.knowledge_cache`, but rebuild it with the new cache schema.
-- Before rebuild, rename the old cache directory instead of deleting it immediately.
-- Use the local OpenAI-compatible Qwen endpoint for the workspace rebuild and scheduled refreshes. Paid OpenAI embedding should only be used when explicitly authorized.
-- Put private workspace defaults in the overlay skill, not in the public repo.
+- Keep one global cache path, but migrate or rebuild it with the v2 cache schema.
+- v1 cache files are concrete persisted data. Do not delete or overwrite them automatically.
+- Use `migrate-v1` when preserving current embeddings matters; use rebuild only when intentionally regenerating embeddings.
+- Keep provider endpoints and private defaults in the host workspace, not in this public repository.
 - Enable the global counter during onboarding to observe rebuild behavior and prevent accidental rebuild loops.
 - After tests pass, keep old cache backups temporarily and delete the old `tools/semantic_search` implementation.
 
-## Dependency Inventory To Migrate
+## Host Integration
 
-- `rules/skills/semantic_search.md`: become private overlay pointing to the standalone skill and defining workspace defaults.
-- `rules/skills/INDEX.md`: update the semantic search entry.
-- `rules/skills/opencode_sessions_archive.md`: update AI sessions semantic index instructions.
-- `contexts/ai_sessions/scripts/sync_sessions.sh`: switch cron indexing to the new CLI and local Qwen config.
-- `periodic_jobs/backup_utility/scripts/borg_backup_knowledge_working.sh`: keep excluding `.knowledge_cache`.
-- `tools/semantic_search/`: delete after migration, not wrap.
-- `.knowledge_cache/`: rename old directory, rebuild in place, verify, then remove old backup.
+Update private overlay instructions, scheduled refresh jobs, and backup exclusions to use the standalone CLI and the selected cache directory. Keep those workspace-specific paths and provider settings outside this public repository.
 
 ## GitHub Plan
 
@@ -35,16 +29,34 @@ Promote the old workspace-local `tools/semantic_search` into a standalone public
 8. Open PR, merge, then pull/update local master.
 9. Migrate the workspace overlay and cron usage in the parent workspace.
 
+## v1 Migration Procedure
+
+1. Stop scheduled writers if a deployment requires a fully quiet cutover. Query readers may continue on the old cache until the command publishes v2.
+2. Choose the target v2 cache directory. It may be the same directory as the v1 files because v2 uses `index.sqlite3` and `segments/`, but keeping a temporary copy is safer for first rollout.
+3. Run:
+
+```bash
+semantic-search migrate-v1 \
+  --v1-cache-dir old-cache \
+  --cache-dir .knowledge_cache \
+  --segment-size 50000
+```
+
+4. Run `semantic-search doctor --cache-dir .knowledge_cache`.
+5. Run representative `query --no-refresh` commands to validate retrieval without triggering new embedding writes.
+6. If `doctor` reports orphan segment files from a crashed migration attempt, run `semantic-search doctor --cache-dir .knowledge_cache --cleanup-orphans` after verifying the active DB is healthy.
+7. Keep v1 files until the v2 cache has passed smoke queries and scheduled refresh has run successfully.
+
+Migration preserves v1 `manifest.json` mtimes even when source paths are relative to a different working directory. v1 did not store source file sizes, so migrated rows use an unknown-size sentinel until that source is next refreshed; mtime remains the change detector during that interval.
+
 ## Rebuild Procedure
 
-1. Stop writers to `.knowledge_cache` if any are running.
-2. Rename `.knowledge_cache` to a timestamped backup.
-3. Create or reuse a private `.env` for the standalone skill if credentials are needed; workspace-specific endpoints and model names belong in the private overlay.
-4. Run rebuild through a background process manager after a short timed validation run; choose `--base-url`, `--model`, `--workers`, and `--batch-size` from the private overlay's tested settings. Global CLI options such as `--base-url` and `--model` must be placed before the `rebuild` or `query` subcommand.
-5. Run `semantic-search doctor` and representative queries.
-6. Run the migrated AI sessions sync manually.
-7. Check `counter.jsonl` for repeated full rebuilds or unexpectedly high API request counts.
-8. Delete the old cache backup after the new cache is verified.
+Use rebuild when you intentionally want fresh embeddings instead of preserving v1 vectors:
+
+1. Create or reuse a private `.env` if credentials are needed; workspace-specific endpoints and model names belong in private overlays.
+2. Run a small timed validation first, then run the full rebuild with provider-specific `--workers` and `--batch-size` settings.
+3. Run `semantic-search doctor` and representative queries.
+4. Check `counter.jsonl` for repeated full rebuilds or unexpectedly high API request counts. Counter events should contain counts only.
 
 ## Privacy Review
 
@@ -61,5 +73,4 @@ Fake `op://your-vault/...` examples are allowed. Real vault paths are not.
 - Scaffold: complete.
 - GitHub repo: complete at `https://github.com/grapeot/semantic-search-skill`.
 - Implementation: merged through the cache/counter migration PRs.
-- Workspace migration: active clients migrated to the standalone CLI; old `tools/semantic_search` implementation deleted from the parent workspace.
-- Cache rebuild: complete. `.knowledge_cache` now uses Qwen 4096-dimension embeddings and passed `doctor` plus smoke query validation.
+- v2 global index performance work: implemented locally on the feature branch with SQLite metadata, append-only normalized segments, explicit v1 migration, and offline tests/benchmark.
