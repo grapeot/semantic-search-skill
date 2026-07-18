@@ -81,3 +81,29 @@ Counter events are aggregate operational metrics only. They must not include sou
 ## Workspace Overlays
 
 This public skill does not prescribe private source directories. A workspace overlay should define common file-list generation commands, the preferred cache directory, and any local cron or launcher integration.
+
+## OpenCode Session Deep Link Output
+
+When a user asks an agent to find, open, or continue a previous OpenCode session, the agent performs the semantic search itself; the client does not run retrieval. The agent should render results as plain Markdown and deliver an executable navigation action through a restricted deep link.
+
+1. Search the workspace's OpenCode session archive first. Other sources may be added when needed, but only results whose frontmatter carries `source: opencode` may produce a session deep link.
+2. Aggregate chunks by the frontmatter `session_id`; list each session at most once. Return 3-5 candidates by default. When strong matches are insufficient, explicitly label the list as "possibly relevant" rather than picking a single answer.
+3. For each candidate, show a title, date, project short name, and a verbatim excerpt from the source. Do not expose embedding similarity scores to the user, and do not replace source evidence with an AI summary.
+4. The `session_id` must come directly from the search result metadata/frontmatter. Never infer it from the filename, title, or body. If the ID is missing, does not start with `ses_`, or contains characters outside ASCII letters, digits, underscore, or hyphen, do not generate an action link.
+5. The executable link must use exactly the form `[Open in OpenCode](opencode://session/<session_id>)`. The link text must be an explicit action; do not turn the title or a whole candidate block into a link.
+6. When `source` is not `opencode` or a valid `session_id` is absent, provide only a plain Markdown file reference and do not emit an `opencode://` link.
+7. Whether the link can be opened by the current host is determined by the client invoking `GET /session/:id` after the user clicks. The agent must not claim a session has been resumed or is guaranteed to continue without live verification.
+8. Do not auto-open links. Do not encode the server URL, credentials, local host profile ID, absolute archive path, or user query into the URL. Do not generate other client actions such as sending messages, approving permissions, or executing tools.
+
+Recommended output shape:
+
+```markdown
+### 1. Session title
+
+> A verbatim excerpt from the matched session.
+
+2026-07-15 · project_name
+[Open in OpenCode](opencode://session/ses_example)
+```
+
+Acceptance for overlay changes should use a synthetic session archive containing at least: two OpenCode sessions, one non-OpenCode session, one session with an illegal or missing session ID, and multiple chunks from the same session. Verify that every `opencode://session/` ID comes from the corresponding synthetic frontmatter, non-OpenCode sources produce no link, each session appears at most once, and every link is accompanied by title, date, and excerpt. Live agent acceptance is opt-in and writes output to a gitignored temp directory; it does not run on every unit test.
