@@ -12,6 +12,7 @@
 8. Small updates do not rewrite old segments. Old chunks are marked inactive and stop participating in query. Default refresh does not compact.
 9. v1 `cache.json` + `manifest.json` + `chunks.jsonl` + `embeddings.npy` caches are explicit persisted data. They require `migrate-v1`; query/rebuild do not auto-upgrade or delete them.
 10. The opt-in counter writes aggregate operational metrics only.
+11. CLI file-list entries become canonical absolute paths before cache lookup or publication. Relative entries resolve against `--source-root`, or the current directory when the flag is omitted.
 
 ## Cache Layout
 
@@ -42,7 +43,7 @@ The cache directory and subdirectories are created with private directory permis
 
 `files` records source file state:
 
-- source path
+- canonical absolute source path
 - `mtime_ns`
 - `size_bytes`
 - active flag
@@ -98,7 +99,13 @@ Crash behavior:
 
 - Before DB publish: rerun `migrate-v1`; any unreferenced segment files are reported as orphans.
 - After DB publish: run `doctor`; referenced segments remain valid.
-- Existing v2 DB: migration fails unless `--replace` is supplied explicitly.
+- Existing v2 DB: migration fails and requires a different target directory.
+
+## Source Path Migration
+
+`canonicalize-paths` repairs v2 caches that contain relative source identities or multiple aliases for the same file. `--source-root` is required so legacy relative paths never depend on the migration process's working directory. The command is a read-only dry run unless `--apply` is supplied.
+
+The migration changes SQLite metadata only and never reads, rewrites, or recomputes embedding segments. For an alias collision, the file row with the newest `updated_at` wins; active chunks from losing aliases become inactive, and all chunk source paths become canonical. The rewrite runs under the writer lock in one SQLite transaction, so a crash rolls back the complete metadata change.
 
 ## Doctor And Cleanup
 
@@ -136,4 +143,6 @@ semantic-search doctor --cache-dir .knowledge_cache
 semantic-search doctor --cache-dir .knowledge_cache --cleanup-orphans
 semantic-search stats --cache-dir .knowledge_cache
 semantic-search migrate-v1 --v1-cache-dir old-cache --cache-dir .knowledge_cache
+semantic-search canonicalize-paths --cache-dir .knowledge_cache --source-root /path/to/workspace
+semantic-search canonicalize-paths --cache-dir .knowledge_cache --source-root /path/to/workspace --apply
 ```

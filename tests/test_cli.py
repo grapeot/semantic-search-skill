@@ -1,7 +1,7 @@
 import numpy as np
 
 import semantic_search_skill.cli as cli
-from semantic_search_skill.cli import build_parser, estimate_rate_per_minute, maybe_write_counter, rank, run_query
+from semantic_search_skill.cli import build_parser, estimate_rate_per_minute, maybe_write_counter, rank, read_file_list, run_query
 from semantic_search_skill.index import CacheConfig, SemanticIndex
 from semantic_search_skill.models import Chunk
 
@@ -34,6 +34,31 @@ def test_parser_accepts_migrate_v1_command() -> None:
     assert args.v1_cache_dir == "old-cache"
     assert args.segment_size == 10
     assert not hasattr(args, "replace")
+
+
+def test_parser_accepts_canonicalize_paths_dry_run_and_apply() -> None:
+    parser = build_parser()
+
+    dry_run = parser.parse_args(["canonicalize-paths", "--cache-dir", "cache", "--source-root", "workspace"])
+    apply = parser.parse_args(["canonicalize-paths", "--cache-dir", "cache", "--source-root", "workspace", "--apply"])
+
+    assert dry_run.command == "canonicalize-paths"
+    assert dry_run.apply is False
+    assert apply.apply is True
+
+
+def test_read_file_list_canonicalizes_and_deduplicates_paths(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / "note.md"
+    source.write_text("hello", encoding="utf-8")
+    file_list = tmp_path / "files.txt"
+    file_list.write_text(f"note.md\n{source}\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    paths = read_file_list(str(file_list), workspace)
+
+    assert paths == [str(source.resolve())]
 
 
 def test_rank_returns_highest_cosine_similarity() -> None:

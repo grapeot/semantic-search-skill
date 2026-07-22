@@ -28,6 +28,12 @@
 - Preserved v1 manifest mtimes during migration so relative source paths are not incorrectly treated as changed when migration runs from another working directory.
 - Profiled a 2.62-million-chunk, 4096-dimension global cache. A representative 17,354-file no-change query fell from about 13m34s and 93.8 GB peak memory footprint on v1 to 45.68s and 557 MB on v2, while preserving the same leading results.
 
+### 2026-07-22
+
+- Canonicalized CLI file-list entries to absolute paths before changed detection, publication, and query, preventing relative and absolute spellings from creating duplicate cache identities.
+- Added explicit `--source-root` handling and file-list deduplication so callers can make relative path resolution independent of their working directory.
+- Added a dry-run-first `canonicalize-paths` migration for existing v2 caches. It merges aliases in one SQLite transaction, preserves immutable vector segments, and recomputes zero embeddings.
+
 ## Lessons Learned
 
 - The old workspace cache failed through a truncated pickle file. The new public cache contract must avoid pickle metadata and use atomic writes.
@@ -35,3 +41,4 @@
 - Live embedding providers can return pathological vectors even when the batch request succeeds. Ranking should sanitize `NaN`/`Inf` defensively so a few bad vectors cannot dominate search results.
 - Segment files should be treated as immutable publish artifacts. Query correctness comes from SQLite active metadata, so orphan physical files are safe but should be reported and cleaned explicitly.
 - Refresh must not publish chunks if a source file changes during read/embed; skipping that file for the current run is safer than indexing a stale snapshot over newer source content.
+- Persisted file paths are database identities, not display strings. Normalize them at the CLI boundary and require an explicit root when repairing legacy relative identities.

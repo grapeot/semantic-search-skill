@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from .chunker import MarkdownChunker, read_text_file
 from .counter import append_counter_event, counter_enabled, counter_path
 from .embedding import DEFAULT_MODEL, DEFAULT_PROVIDER, EmbeddingClient, estimate_embedding_input_chars
-from .index import CacheConfig, CacheError, FileState, SemanticIndex, file_state, migrate_v1_cache, normalize_query, normalize_vectors
+from .index import CacheConfig, CacheError, FileState, SemanticIndex, canonical_source_path, file_state, migrate_v1_cache, normalize_query, normalize_vectors
 from .models import SearchResult
 
 
@@ -27,6 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     query = subparsers.add_parser("query", help="Search an indexed file list")
     query.add_argument("--file-list", required=True)
+    query.add_argument("--source-root", default=None, help="Root for relative paths in the file list; defaults to the current directory")
     query.add_argument("--query", required=True)
     query.add_argument("--top-k", type=int, default=10)
     query.add_argument("--cache-dir", default=None)
@@ -38,6 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     rebuild = subparsers.add_parser("rebuild", help="Build or refresh cache for a file list")
     rebuild.add_argument("--file-list", required=True)
+    rebuild.add_argument("--source-root", default=None, help="Root for relative paths in the file list; defaults to the current directory")
     rebuild.add_argument("--cache-dir", default=None)
     rebuild.add_argument("--workers", type=int, default=64)
     rebuild.add_argument("--batch-size", type=int, default=128)
@@ -55,6 +57,11 @@ def build_parser() -> argparse.ArgumentParser:
     migrate.add_argument("--v1-cache-dir", required=True)
     migrate.add_argument("--cache-dir", default=None, help="Target v2 cache directory; defaults like other commands")
     migrate.add_argument("--segment-size", type=int, default=50000)
+
+    canonicalize = subparsers.add_parser("canonicalize-paths", help="Rewrite existing source identities to canonical absolute paths without recomputing embeddings")
+    canonicalize.add_argument("--cache-dir", default=None)
+    canonicalize.add_argument("--source-root", required=True, help="Root used to resolve legacy relative source paths")
+    canonicalize.add_argument("--apply", action="store_true", help="Apply the migration; the default is a read-only dry run")
 
     return parser
 
@@ -77,6 +84,8 @@ def main(argv: list[str] | None = None) -> int:
             return run_stats(args)
         if args.command == "migrate-v1":
             return run_migrate_v1(args)
+        if args.command == "canonicalize-paths":
+            return run_canonicalize_paths(args)
     except CacheError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 2
@@ -85,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def cache_dir_from_args(args: argparse.Namespace) -> Path:
     value = getattr(args, "cache_dir", None) or os.environ.get("SEMANTIC_SEARCH_CACHE_DIR") or ".knowledge_cache"
-    return Path(value)
+    return Path(value).expanduser().resolve(strict=False)
 
 
 def config_from_args(args: argparse.Namespace) -> CacheConfig:
@@ -95,12 +104,14 @@ def config_from_args(args: argparse.Namespace) -> CacheConfig:
     )
 
 
-def read_file_list(path: str) -> list[str]:
-    return [line.strip() for line in Path(path).read_text(encoding="utf-8").splitlines() if line.strip()]
+def read_file_list(path: str, source_root: str | Path | None = None) -> list[str]:
+    file_list = Path(path).expanduser().resolve(strict=False)
+    root = Path(source_root).expanduser().resolve(strict=False) if source_root is not None else Path.cwd()
+    return list(dict.fromkeys(canonical_source_path(line.strip(), root) for line in file_list.read_text(encoding="utf-8").splitlines() if line.strip()))
 
 
 def run_rebuild(args: argparse.Namespace) -> int:
-    file_paths = read_file_list(args.file_list)
+    file_paths = read_file_list(args.file_list, args.source_root)
     cache_dir = cache_dir_from_args(args)
     config = config_from_args(args)
     index = SemanticIndex(cache_dir, config)
@@ -112,7 +123,7 @@ def run_rebuild(args: argparse.Namespace) -> int:
 
 
 def run_query(args: argparse.Namespace) -> int:
-    file_paths = read_file_list(args.file_list)
+    file_paths = read_file_list(args.file_list, args.source_root)
     cache_dir = cache_dir_from_args(args)
     config = config_from_args(args)
     index = SemanticIndex(cache_dir, config)
@@ -142,6 +153,13 @@ def run_migrate_v1(args: argparse.Namespace) -> int:
     cache_dir = cache_dir_from_args(args)
     config = config_from_args(args)
     event = migrate_v1_cache(args.v1_cache_dir, cache_dir, config, segment_size=args.segment_size)
+    print(json.dumps({"ok": True, **event}, ensure_ascii=False, indent=2))
+    return 0
+
+
+def run_canonicalize_paths(args: argparse.Namespace) -> int:
+    index = SemanticIndex(cache_dir_from_args(args), config_from_args(args))
+    event = index.canonicalize_paths(args.source_root, apply=args.apply)
     print(json.dumps({"ok": True, **event}, ensure_ascii=False, indent=2))
     return 0
 
