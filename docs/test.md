@@ -15,7 +15,9 @@
 - Tiny v1 migration streams `chunks.jsonl` plus mmap `embeddings.npy`, preserves v1 files, and creates valid v2 metadata.
 - Crash-before-publish migration leftovers are recoverable through rerun plus doctor orphan cleanup.
 - Delete/shrink marks old chunks inactive without compaction.
-- CLI argument parsing supports `query`, `rebuild`, `stats`, `doctor`, and `migrate-v1`.
+- Relative and absolute file-list entries canonicalize to one source identity and do not trigger duplicate embedding work.
+- Source-path migration dry-run is read-only; apply merges aliases transactionally, preserves segment files, and reports zero recomputed embeddings.
+- CLI argument parsing supports `query`, `rebuild`, `stats`, `doctor`, `migrate-v1`, and `canonicalize-paths`.
 - Counter writes no private document content.
 - Counter events contain aggregate metrics only.
 

@@ -31,6 +31,8 @@ semantic-search query \
 
 The default embedding model is `text-embedding-3-small`. The default cache directory can be set with `SEMANTIC_SEARCH_CACHE_DIR`.
 
+File-list entries are canonicalized to absolute paths before cache access. Use `--source-root /path/to/workspace` with `query` or `rebuild` when relative entries must resolve independently of the caller's current directory.
+
 `query` refreshes changed files by default. Use `--no-refresh` to perform a pure read against the existing cache. Query reads never acquire a file lock; SQLite WAL provides snapshot isolation. Segment publication, migration, and orphan cleanup share a writer-only lock so physical files cannot race with maintenance.
 
 ## Cache Operations
@@ -59,6 +61,13 @@ semantic-search migrate-v1 \
 ```
 
 The migration reads `chunks.jsonl` line by line and memory-maps `embeddings.npy`, then atomically publishes the v2 SQLite database after segment files are safely written. If a process crashes before publish, rerun `migrate-v1`; leftover unreferenced segment files are reported by `doctor` and can be removed with `doctor --cleanup-orphans`.
+
+Repair relative or duplicate source identities in an existing v2 cache with a dry run followed by an explicit apply. This changes SQLite metadata only and recomputes no embeddings:
+
+```bash
+semantic-search canonicalize-paths --cache-dir .knowledge_cache --source-root /path/to/workspace
+semantic-search canonicalize-paths --cache-dir .knowledge_cache --source-root /path/to/workspace --apply
+```
 
 ## Offline Benchmark
 

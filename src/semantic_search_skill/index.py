@@ -48,9 +48,17 @@ class FileState:
     size_bytes: int = 0
 
 
+def canonical_source_path(path: str | Path, source_root: str | Path | None = None) -> str:
+    source = Path(path).expanduser()
+    if not source.is_absolute():
+        root = Path(source_root).expanduser() if source_root is not None else Path.cwd()
+        source = root / source
+    return str(source.resolve(strict=False))
+
+
 class SemanticIndex:
     def __init__(self, cache_dir: str | Path, config: CacheConfig) -> None:
-        self.cache_dir = Path(cache_dir)
+        self.cache_dir = Path(cache_dir).expanduser().resolve(strict=False)
         self.config = config
         self.db_path = self.cache_dir / DB_NAME
         self.segments_dir = self.cache_dir / SEGMENTS_DIR
@@ -537,6 +545,114 @@ class SemanticIndex:
             "compaction_recommended": inactive_chunks > 0,
             "stats": self.stats(),
         }
+
+    def canonicalize_paths(self, source_root: str | Path, *, apply: bool = False) -> dict[str, Any]:
+        self.load(require_exists=True)
+        root = Path(source_root).expanduser().resolve(strict=False)
+
+        def run(conn: sqlite3.Connection) -> dict[str, Any]:
+            rows = list(conn.execute("SELECT path, mtime_ns, size_bytes, active, chunk_count, updated_at FROM files"))
+            groups: dict[str, list[sqlite3.Row]] = {}
+            for row in rows:
+                canonical = canonical_source_path(str(row["path"]), root)
+                groups.setdefault(canonical, []).append(row)
+
+            migrations: list[tuple[str, str, int]] = []
+            for canonical, aliases in groups.items():
+                if len(aliases) == 1 and str(aliases[0]["path"]) == canonical:
+                    continue
+                winner = max(aliases, key=lambda row: (str(row["updated_at"]), str(row["path"]) == canonical))
+                winner_path = str(winner["path"])
+                migrations.extend((str(row["path"]), canonical, int(str(row["path"]) == winner_path)) for row in aliases)
+
+            conn.execute("DROP TABLE IF EXISTS temp.path_migration")
+            conn.execute(
+                "CREATE TEMP TABLE path_migration(old_path TEXT PRIMARY KEY, canonical_path TEXT NOT NULL, is_winner INTEGER NOT NULL)"
+            )
+            conn.executemany("INSERT INTO path_migration VALUES (?, ?, ?)", migrations)
+            summary = conn.execute(
+                """
+                SELECT
+                    count(DISTINCT canonical_path) AS canonical_file_count,
+                    sum(old_path != canonical_path) AS paths_rewritten,
+                    count(*) - count(DISTINCT canonical_path) AS duplicate_file_rows_removed
+                FROM path_migration
+                """
+            ).fetchone()
+            chunk_summary = conn.execute(
+                """
+                SELECT
+                    count(*) FILTER (WHERE pm.old_path != pm.canonical_path) AS chunks_reassigned,
+                    count(*) FILTER (WHERE pm.is_winner = 0 AND c.active = 1) AS active_chunks_deactivated
+                FROM chunks c JOIN path_migration pm ON pm.old_path = c.source_file
+                """
+            ).fetchone()
+            report = {
+                "source_root": str(root),
+                "canonical_file_count": int(summary["canonical_file_count"] or 0),
+                "paths_rewritten": int(summary["paths_rewritten"] or 0),
+                "duplicate_file_rows_removed": int(summary["duplicate_file_rows_removed"] or 0),
+                "chunks_reassigned": int(chunk_summary["chunks_reassigned"] or 0),
+                "active_chunks_deactivated": int(chunk_summary["active_chunks_deactivated"] or 0),
+                "embeddings_recomputed": 0,
+                "applied": apply,
+            }
+            if not apply or not migrations:
+                return report
+
+            conn.execute(
+                "UPDATE chunks SET active = 0 WHERE active = 1 AND source_file IN "
+                "(SELECT old_path FROM path_migration WHERE is_winner = 0)"
+            )
+            conn.execute(
+                """
+                UPDATE chunks
+                SET chunk_uid = (
+                    SELECT pm.canonical_path || substr(chunks.chunk_uid, length(chunks.source_file) + 1)
+                    FROM path_migration pm WHERE pm.old_path = chunks.source_file
+                )
+                WHERE source_file IN (SELECT old_path FROM path_migration WHERE old_path != canonical_path)
+                  AND substr(chunk_uid, 1, length(source_file) + 1) = source_file || ':'
+                """
+            )
+            conn.execute(
+                """
+                UPDATE chunks
+                SET source_file = (SELECT pm.canonical_path FROM path_migration pm WHERE pm.old_path = chunks.source_file)
+                WHERE source_file IN (SELECT old_path FROM path_migration WHERE old_path != canonical_path)
+                """
+            )
+            conn.execute("DROP TABLE IF EXISTS temp.path_winner")
+            conn.execute(
+                """
+                CREATE TEMP TABLE path_winner AS
+                SELECT pm.canonical_path AS path, f.mtime_ns, f.size_bytes, f.active, f.chunk_count, f.updated_at
+                FROM files f JOIN path_migration pm ON pm.old_path = f.path
+                WHERE pm.is_winner = 1
+                """
+            )
+            conn.execute("DELETE FROM files WHERE path IN (SELECT old_path FROM path_migration)")
+            conn.execute(
+                "INSERT INTO files(path, mtime_ns, size_bytes, active, chunk_count, updated_at) "
+                "SELECT path, mtime_ns, size_bytes, active, chunk_count, updated_at FROM path_winner"
+            )
+            _set_meta(conn, {"updated_at": _now(), "source_paths_canonicalized_at": _now()})
+            return report
+
+        if not apply:
+            with self.connect(readonly=True) as conn:
+                conn.execute("BEGIN")
+                return run(conn)
+        with self.writer_lock():
+            with self.connect(readonly=False) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    report = run(conn)
+                    conn.commit()
+                except BaseException:
+                    conn.rollback()
+                    raise
+                return report
 
 
 def migrate_v1_cache(v1_cache_dir: str | Path, v2_cache_dir: str | Path, config: CacheConfig, *, segment_size: int = 50_000) -> dict[str, Any]:

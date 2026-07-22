@@ -54,6 +54,29 @@ def test_refresh_index_handles_unchanged_batches(tmp_path, monkeypatch) -> None:
     assert event["estimated_embedding_cost_usd"] == 0.0
 
 
+def test_relative_and_absolute_file_list_entries_share_cache_identity(tmp_path, monkeypatch) -> None:
+    source = tmp_path / "note.md"
+    source.write_text("# Note\nhello", encoding="utf-8")
+    relative_list = tmp_path / "relative.txt"
+    absolute_list = tmp_path / "absolute.txt"
+    relative_list.write_text("note.md\n", encoding="utf-8")
+    absolute_list.write_text(f"{source}\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "EmbeddingClient", FakeEmbedder)
+    index = SemanticIndex(tmp_path / "cache", CacheConfig(provider="openai", model="text-embedding-3-small"))
+    args = SimpleNamespace(batch_size=16, workers=1, base_url=None, file_batch_size=1)
+
+    relative_paths = cli.read_file_list(str(relative_list), tmp_path)
+    absolute_paths = cli.read_file_list(str(absolute_list), tmp_path)
+    first = cli.refresh_index(index, relative_paths, args)
+    second = cli.refresh_index(index, absolute_paths, args)
+
+    assert relative_paths == absolute_paths == [str(source.resolve())]
+    assert first["embedding_requests"] == 1
+    assert second["files_updated"] == 0
+    assert second["embedding_requests"] == 0
+    assert index.stats()["file_count"] == 1
+
+
 def test_refresh_index_publishes_source_deletion(tmp_path, monkeypatch) -> None:
     path = tmp_path / "note.md"
     path.write_text("# Note\nhello", encoding="utf-8")

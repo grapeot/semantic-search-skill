@@ -492,8 +492,61 @@ def test_changed_files_detects_shrink_and_delete(tmp_path) -> None:
     source.write_text("hi", encoding="utf-8")
 
     assert index.changed_files([str(source)]) == [str(source)]
-
     index.replace_files([_chunk(source, "hi")], np.asarray([[0.0, 1.0]], dtype=np.float32), [str(source)], file_states={str(source): file_state(source)})
     source.unlink()
 
     assert index.changed_files([str(source)]) == [str(source)]
+
+
+def test_canonicalize_paths_dry_run_does_not_modify_cache(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / "note.md"
+    source.write_text("hello", encoding="utf-8")
+    cache = tmp_path / "cache"
+    index = SemanticIndex(cache, CONFIG)
+    monkeypatch.chdir(workspace)
+    index.replace_files([_chunk(Path("note.md"), "hello")], np.asarray([[1.0, 0.0]], dtype=np.float32), ["note.md"])
+
+    report = index.canonicalize_paths(workspace)
+
+    assert report["applied"] is False
+    assert report["paths_rewritten"] == 1
+    assert report["embeddings_recomputed"] == 0
+    with index.connect(readonly=True) as conn:
+        assert conn.execute("SELECT path FROM files").fetchone()["path"] == "note.md"
+
+
+def test_canonicalize_paths_merges_aliases_and_keeps_newest_chunks(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / "note.md"
+    source.write_text("old", encoding="utf-8")
+    cache = tmp_path / "cache"
+    index = SemanticIndex(cache, CONFIG)
+    absolute = str(source.resolve())
+    index.replace_files([_chunk(source, "old")], np.asarray([[1.0, 0.0]], dtype=np.float32), [absolute])
+    source.write_text("new", encoding="utf-8")
+    monkeypatch.chdir(workspace)
+    index.replace_files([_chunk(Path("note.md"), "new")], np.asarray([[0.0, 1.0]], dtype=np.float32), ["note.md"])
+    with index.connect(readonly=False) as conn:
+        conn.execute("UPDATE files SET updated_at = '2026-01-01T00:00:00Z' WHERE path = ?", (absolute,))
+        conn.execute("UPDATE files SET updated_at = '2026-01-02T00:00:00Z' WHERE path = 'note.md'")
+        conn.commit()
+    segment_paths = _segment_paths(cache)
+
+    report = index.canonicalize_paths(workspace, apply=True)
+
+    assert report["applied"] is True
+    assert report["paths_rewritten"] == 1
+    assert report["duplicate_file_rows_removed"] == 1
+    assert report["active_chunks_deactivated"] == 1
+    assert report["embeddings_recomputed"] == 0
+    assert _segment_paths(cache) == segment_paths
+    assert index.stats()["file_count"] == 1
+    with index.connect(readonly=True) as conn:
+        assert conn.execute("SELECT path FROM files").fetchone()["path"] == absolute
+        assert conn.execute("SELECT count(*) FROM chunks WHERE source_file != ?", (absolute,)).fetchone()[0] == 0
+    results = index.search([absolute], np.asarray([0.0, 1.0], dtype=np.float32), 2)
+    assert [result.chunk.text for result in results] == ["new"]
+    assert results[0].chunk.id.startswith(f"{absolute}:")

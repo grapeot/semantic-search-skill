@@ -30,6 +30,8 @@ Build or refresh an index:
 semantic-search rebuild --file-list tmp/files.txt --cache-dir .knowledge_cache --workers 64
 ```
 
+The CLI canonicalizes every file-list entry to an absolute path before cache access. Pass `--source-root /path/to/workspace` when relative entries should resolve independently of the caller's current directory.
+
 Query the indexed files:
 
 ```bash
@@ -64,9 +66,18 @@ Explicitly migrate a v1 cache:
 semantic-search migrate-v1 --v1-cache-dir old-cache --cache-dir .knowledge_cache
 ```
 
+Repair relative or duplicate identities in an existing v2 cache. The first command is a read-only dry run; inspect its JSON report before applying:
+
+```bash
+semantic-search canonicalize-paths --cache-dir .knowledge_cache --source-root /path/to/workspace
+semantic-search canonicalize-paths --cache-dir .knowledge_cache --source-root /path/to/workspace --apply
+```
+
 ## Cache Contract
 
 The v2 cache stores metadata in one SQLite database and vectors in append-only normalized `float32` NumPy segment files. Segments are physical shards of the same logical global index, not separate indexes.
+
+Source identities are canonical absolute paths. `canonicalize-paths` rewrites SQLite metadata only, keeps all segment files unchanged, and reports `embeddings_recomputed: 0`.
 
 Query reads do not acquire a file lock. SQLite WAL snapshot isolation lets queries run while a writer prepares a refresh. Refresh computes changed chunks and embeddings first, then uses a writer-only lock and a short SQLite transaction to publish the segment safely. Migration and orphan cleanup use the same writer lock.
 
