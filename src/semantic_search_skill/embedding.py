@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from itertools import islice
@@ -22,17 +24,48 @@ class EmbeddingClient:
         base_url: str | None = None,
         max_retries: int = 8,
         max_input_chars: int = DEFAULT_MAX_INPUT_CHARS,
+        *,
+        fallback_base_url: str | None = None,
+        fallback_model: str | None = None,
     ) -> None:
         self.model = model
-        self.client = OpenAI(api_key=api_key or os.environ.get("OPENAI_API_KEY"), base_url=base_url)
+        self._api_key = api_key or os.environ.get("OPENAI_API_KEY")
+        self.client = OpenAI(api_key=self._api_key, base_url=base_url)
+        self._fallback_base_url = fallback_base_url
+        self.fallback_model = fallback_model
+        self._fallback_client: OpenAI | None = None
+        self._use_fallback = False
+        self._switch_lock = threading.Lock()
         self.max_retries = max_retries
         self.max_input_chars = max_input_chars
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         normalized = [_normalize_input(text, self.max_input_chars) for text in texts]
+        if not self._use_fallback:
+            try:
+                return self._embed_with(self.client, self.model, normalized)
+            except Exception as exc:
+                if self._fallback_base_url is None or self.fallback_model is None:
+                    raise
+                with self._switch_lock:
+                    already_switched = self._use_fallback
+                    if not already_switched:
+                        self._use_fallback = True
+                        print(
+                            f"primary embedding endpoint failed ({exc}); switching to fallback {self._fallback_base_url}",
+                            file=sys.stderr,
+                        )
+        return self._embed_with(self._fallback(), self.fallback_model, normalized)
+
+    def _fallback(self) -> OpenAI:
+        if self._fallback_client is None:
+            self._fallback_client = OpenAI(api_key=self._api_key, base_url=self._fallback_base_url)
+        return self._fallback_client
+
+    def _embed_with(self, client: OpenAI, model: str, texts: list[str]) -> list[list[float]]:
         for attempt in range(self.max_retries + 1):
             try:
-                response = self.client.embeddings.create(input=normalized, model=self.model)
+                response = client.embeddings.create(input=texts, model=model)
                 return [item.embedding for item in response.data]
             except (RateLimitError, APITimeoutError, APIConnectionError) as exc:
                 if attempt >= self.max_retries:

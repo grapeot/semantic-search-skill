@@ -34,6 +34,14 @@
 - Added explicit `--source-root` handling and file-list deduplication so callers can make relative path resolution independent of their working directory.
 - Added a dry-run-first `canonicalize-paths` migration for existing v2 caches. It merges aliases in one SQLite transaction, preserves immutable vector segments, and recomputes zero embeddings.
 
+### 2026-08-09
+
+- Added optional transport-level endpoint failover in `EmbeddingClient`. When the primary OpenAI-compatible endpoint fails a batch after exhausting retries (connection error, timeout, rate limit, 4xx, or 5xx), the client sticky-switches to an optional fallback endpoint+model for the remainder of the process. A `threading.Lock` guarantees the switch warning prints at most once even under concurrent workers.
+- Failover is cache-invisible: `CacheConfig.model` and cache metadata always reflect the primary model id. Two endpoints serving the same architecture with slightly different serving stacks (e.g. cosine similarity ~0.99) can therefore share one cache directory.
+- One `EmbeddingClient` instance is now shared across all file batches within a single `refresh_index` call and reused for the query embedding in `run_query`, so the sticky switch survives the whole CLI invocation rather than resetting per batch.
+- New env vars `SEMANTIC_SEARCH_BASE_URL`, `SEMANTIC_SEARCH_FALLBACK_BASE_URL`, `SEMANTIC_SEARCH_FALLBACK_MODEL` and CLI flags `--fallback-base-url` / `--fallback-model`. The fallback constructor parameters are keyword-only, preserving the original positional signature for backward compatibility. The public `self.client` attribute is preserved (eager primary construction restored).
+- Strengthened the fallback unit tests to assert which client and model id each embed call targets, and added a regression test that `refresh_index` shares one embedder across batches.
+
 ## Lessons Learned
 
 - The old workspace cache failed through a truncated pickle file. The new public cache contract must avoid pickle metadata and use atomic writes.
@@ -42,3 +50,5 @@
 - Segment files should be treated as immutable publish artifacts. Query correctness comes from SQLite active metadata, so orphan physical files are safe but should be reported and cleaned explicitly.
 - Refresh must not publish chunks if a source file changes during read/embed; skipping that file for the current run is safer than indexing a stale snapshot over newer source content.
 - Persisted file paths are database identities, not display strings. Normalize them at the CLI boundary and require an explicit root when repairing legacy relative identities.
+- Endpoint failover belongs in the transport layer, not the cache layer. Two OpenAI-compatible servers running the same model architecture produce near-identical (but not bit-exact) embeddings; recording only the primary model id in cache metadata lets a fallback server reuse an existing cache without invalidation, at the cost of ~1% vector noise that does not meaningfully change retrieval ranking.
+- A sticky failover flag is useless if a new client is constructed per work unit. Long rebuilds that split files into batches must share one embedding client across all batches, otherwise a hard-down primary burns its full retry budget again on every batch.

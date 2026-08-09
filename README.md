@@ -19,6 +19,10 @@ cp .env.example .env
 op run --env-file=.env -- semantic-search --help
 ```
 
+### Custom OpenAI-compatible endpoints
+
+Point the CLI at any OpenAI-compatible embedding server with `SEMANTIC_SEARCH_BASE_URL` (or `--base-url`). An optional fallback endpoint is used automatically when the primary is unreachable: set `SEMANTIC_SEARCH_FALLBACK_BASE_URL` together with `SEMANTIC_SEARCH_FALLBACK_MODEL` (or `--fallback-base-url` / `--fallback-model`). On a hard primary failure the client switches to the fallback for the rest of the process. See `.env.example` for placeholders.
+
 ## Basic Usage
 
 ```bash
