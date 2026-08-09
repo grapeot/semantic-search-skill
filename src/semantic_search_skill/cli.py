@@ -23,6 +23,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default=None, help="Embedding model; defaults to SEMANTIC_SEARCH_EMBEDDING_MODEL or text-embedding-3-small")
     parser.add_argument("--provider", default=None, help="Embedding provider name for cache metadata")
     parser.add_argument("--base-url", default=None, help="Optional OpenAI-compatible base URL")
+    parser.add_argument("--fallback-base-url", default=None, help="Optional fallback OpenAI-compatible base URL")
+    parser.add_argument("--fallback-model", default=None, help="Embedding model for the fallback endpoint")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     query = subparsers.add_parser("query", help="Search an indexed file list")
@@ -73,6 +75,7 @@ def main(argv: list[str] | None = None) -> int:
         load_dotenv(args.env_file)
     else:
         load_dotenv()
+    fallback_config_from_args(args)
     try:
         if args.command == "rebuild":
             return run_rebuild(args)
@@ -104,6 +107,24 @@ def config_from_args(args: argparse.Namespace) -> CacheConfig:
     )
 
 
+def fallback_config_from_args(args: argparse.Namespace) -> tuple[str | None, str | None]:
+    url = getattr(args, "fallback_base_url", None) or os.environ.get("SEMANTIC_SEARCH_FALLBACK_BASE_URL")
+    model = getattr(args, "fallback_model", None) or os.environ.get("SEMANTIC_SEARCH_FALLBACK_MODEL")
+    if url and not model:
+        raise SystemExit("SEMANTIC_SEARCH_FALLBACK_MODEL / --fallback-model required when fallback URL is set")
+    return url, model
+
+
+def build_embedder(args: argparse.Namespace, model: str) -> EmbeddingClient:
+    fallback_base_url, fallback_model = fallback_config_from_args(args)
+    return EmbeddingClient(
+        model=model,
+        base_url=args.base_url or os.environ.get("SEMANTIC_SEARCH_BASE_URL"),
+        fallback_base_url=fallback_base_url,
+        fallback_model=fallback_model,
+    )
+
+
 def read_file_list(path: str, source_root: str | Path | None = None) -> list[str]:
     file_list = Path(path).expanduser().resolve(strict=False)
     root = Path(source_root).expanduser().resolve(strict=False) if source_root is not None else Path.cwd()
@@ -127,12 +148,12 @@ def run_query(args: argparse.Namespace) -> int:
     cache_dir = cache_dir_from_args(args)
     config = config_from_args(args)
     index = SemanticIndex(cache_dir, config)
+    embedder = build_embedder(args, config.model)
     if args.no_refresh:
         index.load(require_exists=True)
         event = {"files_scanned": len(file_paths), "files_updated": 0, "chunks_added": 0, "embedding_requests": 0}
     else:
-        event = refresh_index(index, file_paths, args)
-    embedder = EmbeddingClient(model=config.model, base_url=args.base_url)
+        event = refresh_index(index, file_paths, args, embedder=embedder)
     query_vector = np.asarray(embedder.embed_batch([args.query])[0], dtype=np.float32)
     results = index.search(file_paths, query_vector, args.top_k)
     event = {"command": "query", **event, "query_embedding_requests": 1, "result_count": len(results)}
@@ -172,7 +193,9 @@ def run_stats(args: argparse.Namespace) -> int:
     return 0
 
 
-def refresh_index(index: SemanticIndex, file_paths: list[str], args: argparse.Namespace) -> dict[str, int]:
+def refresh_index(index: SemanticIndex, file_paths: list[str], args: argparse.Namespace, embedder: EmbeddingClient | None = None) -> dict[str, int]:
+    if embedder is None:
+        embedder = build_embedder(args, index.config.model)
     totals = {
         "files_scanned": len(file_paths),
         "files_updated": 0,
@@ -188,7 +211,7 @@ def refresh_index(index: SemanticIndex, file_paths: list[str], args: argparse.Na
     for start in range(0, len(file_paths), file_batch_size):
         batch = file_paths[start : start + file_batch_size]
         batch_started = time.monotonic()
-        event = refresh_index_batch(index, batch, args)
+        event = refresh_index_batch(index, batch, args, embedder)
         duration_s = round(time.monotonic() - batch_started, 3)
         event["duration_s"] = duration_s
         event["estimated_tokens_per_minute"] = estimate_rate_per_minute(event["estimated_embedding_tokens"], duration_s)
@@ -212,7 +235,7 @@ def refresh_index(index: SemanticIndex, file_paths: list[str], args: argparse.Na
     return totals
 
 
-def refresh_index_batch(index: SemanticIndex, file_paths: list[str], args: argparse.Namespace) -> dict[str, int]:
+def refresh_index_batch(index: SemanticIndex, file_paths: list[str], args: argparse.Namespace, embedder: EmbeddingClient | None = None) -> dict[str, int]:
     changed = index.changed_files(file_paths)
     if not changed:
         return empty_refresh_event()
@@ -236,7 +259,8 @@ def refresh_index_batch(index: SemanticIndex, file_paths: list[str], args: argpa
             continue
         chunks.extend(chunker.chunk(file_path, content))
     if chunks:
-        embedder = EmbeddingClient(model=index.config.model, base_url=args.base_url)
+        if embedder is None:
+            embedder = build_embedder(args, index.config.model)
         texts = [chunk.text for chunk in chunks]
         input_chars = estimate_embedding_input_chars(texts)
         vectors, requests = embedder.embed_batches_parallel(texts, args.batch_size, args.workers)

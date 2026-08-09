@@ -91,3 +91,27 @@ def test_refresh_index_publishes_source_deletion(tmp_path, monkeypatch) -> None:
     assert event["files_updated"] == 1
     assert event["chunks_added"] == 0
     assert index.search([str(path)], np.asarray([1.0, 0.0], dtype=np.float32), 1) == []
+
+
+def test_refresh_index_shares_one_embedder_across_batches(tmp_path, monkeypatch) -> None:
+    files = []
+    for index in range(3):
+        path = tmp_path / f"note{index}.md"
+        path.write_text(f"# Note {index}\nhello", encoding="utf-8")
+        files.append(str(path))
+    monkeypatch.setattr(cli, "EmbeddingClient", FakeEmbedder)
+    index = SemanticIndex(tmp_path / "cache", CacheConfig(provider="openai", model="text-embedding-3-small"))
+    args = SimpleNamespace(batch_size=16, workers=1, base_url=None, file_batch_size=1)
+    seen = []
+    real_batch = cli.refresh_index_batch
+
+    def spy(idx, file_paths, a, embedder=None):
+        seen.append(embedder)
+        return real_batch(idx, file_paths, a, embedder)
+
+    monkeypatch.setattr(cli, "refresh_index_batch", spy)
+
+    cli.refresh_index(index, files, args)
+
+    assert len(seen) == 3
+    assert all(e is seen[0] for e in seen), "embedder must be a single shared instance across all batches"
