@@ -30,7 +30,7 @@ Build or refresh an index:
 semantic-search rebuild --file-list tmp/files.txt --cache-dir .knowledge_cache --workers 64
 ```
 
-The CLI canonicalizes every file-list entry to an absolute path before cache access. Pass `--source-root /path/to/workspace` when relative entries should resolve independently of the caller's current directory.
+The CLI canonicalizes every file-list entry to an absolute path before cache access. Relative entries resolve against `--source-root` when provided, otherwise against the CLI's current working directory — not the directory the file list was generated in. If the list was generated elsewhere (for example with `find` from a workspace root) and the CLI runs from a different directory, the resolved paths will not match any cached identity and the query silently returns an empty result with no error. Generate the list with absolute paths, or pass `--source-root` pointing at the directory the relative entries were generated from.
 
 Query the indexed files:
 
