@@ -42,6 +42,10 @@
 - New env vars `SEMANTIC_SEARCH_BASE_URL`, `SEMANTIC_SEARCH_FALLBACK_BASE_URL`, `SEMANTIC_SEARCH_FALLBACK_MODEL` and CLI flags `--fallback-base-url` / `--fallback-model`. The fallback constructor parameters are keyword-only, preserving the original positional signature for backward compatibility. The public `self.client` attribute is preserved (eager primary construction restored).
 - Strengthened the fallback unit tests to assert which client and model id each embed call targets, and added a regression test that `refresh_index` shares one embedder across batches.
 
+### 2026-08-25
+
+- Documented the silent-empty-result failure mode for relative file-list entries: they resolve against the CLI's cwd (or `--source-root`) rather than the directory the list was generated in, so a list generated from a workspace root and queried from another directory matches no cached identities and returns `[]` with no error or warning. Clarified the canonical skill to generate absolute-path lists or pin `--source-root` to the generation directory.
+
 ## Lessons Learned
 
 - The old workspace cache failed through a truncated pickle file. The new public cache contract must avoid pickle metadata and use atomic writes.
@@ -52,3 +56,4 @@
 - Persisted file paths are database identities, not display strings. Normalize them at the CLI boundary and require an explicit root when repairing legacy relative identities.
 - Endpoint failover belongs in the transport layer, not the cache layer. Two OpenAI-compatible servers running the same model architecture produce near-identical (but not bit-exact) embeddings; recording only the primary model id in cache metadata lets a fallback server reuse an existing cache without invalidation, at the cost of ~1% vector noise that does not meaningfully change retrieval ranking.
 - A sticky failover flag is useless if a new client is constructed per work unit. Long rebuilds that split files into batches must share one embedding client across all batches, otherwise a hard-down primary burns its full retry budget again on every batch.
+- A relative file list is only as correct as the directory it is resolved against. Because entries resolve against the CLI's cwd (or `--source-root`), a list generated from one directory and queried from another silently matches nothing and returns an empty result with no warning. Prefer absolute-path lists, or pin `--source-root` to the generation directory; an empty query result on a known-populated cache is the first sign of this mismatch.
