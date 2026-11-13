@@ -152,3 +152,21 @@ def test_counter_event_contains_only_aggregate_fields(tmp_path, monkeypatch) -> 
     assert private_path not in content
     assert "files_scanned" in content
     assert "query" in content
+
+
+def test_query_input_adds_instruction_for_qwen3_embedding(monkeypatch) -> None:
+    from semantic_search_skill.cli import DEFAULT_QUERY_TASK, query_input
+
+    monkeypatch.delenv("SEMANTIC_SEARCH_QUERY_INSTRUCTION", raising=False)
+    assert query_input("demo rules", "Qwen/Qwen3-Embedding-8B") == f"Instruct: {DEFAULT_QUERY_TASK}\nQuery:demo rules"
+    assert query_input("demo rules", "text-embedding-qwen3-embedding-8b").startswith("Instruct: ")
+    assert query_input("demo rules", "text-embedding-3-small") == "demo rules"
+
+
+def test_query_input_override_and_disable(monkeypatch) -> None:
+    from semantic_search_skill.cli import query_input
+
+    monkeypatch.setenv("SEMANTIC_SEARCH_QUERY_INSTRUCTION", "Find meeting notes")
+    assert query_input("q", "text-embedding-3-small") == "Instruct: Find meeting notes\nQuery:q"
+    assert query_input("q", "Qwen/Qwen3-Embedding-8B", "none") == "q"
+    assert query_input("q", "Qwen/Qwen3-Embedding-8B", "Custom task") == "Instruct: Custom task\nQuery:q"

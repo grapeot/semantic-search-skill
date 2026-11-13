@@ -42,6 +42,8 @@ semantic-search query \
   --top-k 10
 ```
 
+For Qwen3-Embedding models `query` adds a retrieval instruction to the query automatically (documents are embedded as-is); override with `--query-instruction "<task>"` or `SEMANTIC_SEARCH_QUERY_INSTRUCTION`, disable with `--query-instruction none`.
+
 Use `--no-refresh` when the task requires a pure read of the existing cache:
 
 ```bash
