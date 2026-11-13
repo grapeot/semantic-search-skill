@@ -16,6 +16,9 @@ from .embedding import DEFAULT_MODEL, DEFAULT_PROVIDER, EmbeddingClient, estimat
 from .index import CacheConfig, CacheError, FileState, SemanticIndex, canonical_source_path, file_state, migrate_v1_cache, normalize_query, normalize_vectors
 from .models import SearchResult
 
+# Qwen's default retrieval task ("Given a web search query, ...") without "web": we search local files.
+DEFAULT_QUERY_TASK = "Given a search query, retrieve relevant passages that answer the query"
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Semantic search over local text files")
@@ -150,25 +153,25 @@ def run_rebuild(args: argparse.Namespace) -> int:
     return 0
 
 
-DEFAULT_QUERY_TASK = "Given a search query, retrieve relevant passages that answer the query"
-
-
 def query_input(query: str, model: str, instruction: str | None = None) -> str:
     """Text to embed for a query.
 
     Instruction-aware embedding models such as Qwen3-Embedding expect queries as
     'Instruct: <task>\nQuery:<query>' while documents are embedded as-is. Without the
     instruction, near-empty chunks (a lone heading) outrank the passage that answers the query.
-    Only the query side changes, so existing caches stay valid.
+    Only the query side changes, so existing caches stay valid. The query itself is flattened to
+    one line; the newline before "Query:" is kept, so embed the result with keep_newlines=True.
+    An empty SEMANTIC_SEARCH_QUERY_INSTRUCTION counts as unset.
     """
+    flat = query.replace("\n", " ").strip()
     if instruction is None:
-        instruction = os.environ.get("SEMANTIC_SEARCH_QUERY_INSTRUCTION")
+        instruction = os.environ.get("SEMANTIC_SEARCH_QUERY_INSTRUCTION") or None
     if instruction is None:
         instruction = DEFAULT_QUERY_TASK if "qwen3-embedding" in model.lower() else ""
     instruction = instruction.strip()
     if not instruction or instruction.lower() == "none":
-        return query
-    return f"Instruct: {instruction}\nQuery:{query}"
+        return flat
+    return f"Instruct: {instruction}\nQuery:{flat}"
 
 
 def run_query(args: argparse.Namespace) -> int:
@@ -183,7 +186,7 @@ def run_query(args: argparse.Namespace) -> int:
     else:
         event = refresh_index(index, file_paths, args, embedder=embedder)
     text = query_input(args.query, config.model, getattr(args, "query_instruction", None))
-    query_vector = np.asarray(embedder.embed_batch([text])[0], dtype=np.float32)
+    query_vector = np.asarray(embedder.embed_batch([text], keep_newlines=True)[0], dtype=np.float32)
     results = index.search(file_paths, query_vector, args.top_k)
     event = {"command": "query", **event, "query_embedding_requests": 1, "result_count": len(results)}
     maybe_write_counter(args, cache_dir, event)

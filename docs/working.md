@@ -6,6 +6,7 @@
 
 - `query` now prepends a task instruction for instruction-aware embedding models: Qwen3-Embedding expects `Instruct: <task>\nQuery:<query>` for queries and raw text for documents. Auto-enabled when the model name contains `qwen3-embedding` (both the Hugging Face id and the LM Studio name), with Qwen's generic retrieval task as the default; configurable via `--query-instruction` / `SEMANTIC_SEARCH_QUERY_INSTRUCTION`, `none` disables. Query side only; no cache change.
 - Measured on a 102-file, 1412-chunk demo workspace (Qwen3-Embedding-8B): the note answering four paraphrased questions ranked 57th, 66th, 163rd and 77th without the instruction, because 271 near-empty heading chunks (under 40 characters) scored about 0.6 against every query; with the instruction it ranked 2nd, 1st, 4th and 1st. Ranking is still sensitive to the task wording and to chunks that mix several topics.
+- Review fix: `_normalize_input` flattens newlines, which turned the instruction's `\nQuery:` into a space. `embed_batch` gained `keep_newlines=True` for the query; the query text itself is still flattened. Live check against Qwen3-Embedding-8B: newline and space versions differ by cosine 0.9966; re-measured with the newline kept, the four ranks stay 2nd, 1st, 4th and 1st. Added `docs/rfc.md` query-path note, empty-variable-as-unset, and tests that go through normalization and through `run_query` with a capturing fake embedder.
 
 ### 2026-06-30
 

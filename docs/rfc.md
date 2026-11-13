@@ -71,7 +71,7 @@ SQLite indexes cover `(source_file, active)` and `(segment_id, active, segment_r
 ## Query Path
 
 1. If `--no-refresh` is absent, run refresh first.
-2. Embed the query text once.
+2. Embed the query text once. For instruction-aware models (model name contains `qwen3-embedding`) the query is sent as `Instruct: <task>\nQuery:<query>`; the task defaults to a generic retrieval task and is set with `--query-instruction` or `SEMANTIC_SEARCH_QUERY_INSTRUCTION` (`none` disables; an empty variable counts as unset). Documents are embedded as-is, so this needs no cache change.
 3. Read active chunks for the requested file list from SQLite.
 4. Group matching rows by segment.
 5. Memory-map each referenced segment, score matching rows in batches, and maintain an exact global top-k heap across segments.
