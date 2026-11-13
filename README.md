@@ -23,6 +23,12 @@ op run --env-file=.env -- semantic-search --help
 
 Point the CLI at any OpenAI-compatible embedding server with `SEMANTIC_SEARCH_BASE_URL` (or `--base-url`). An optional fallback endpoint is used automatically when the primary is unreachable: set `SEMANTIC_SEARCH_FALLBACK_BASE_URL` together with `SEMANTIC_SEARCH_FALLBACK_MODEL` (or `--fallback-base-url` / `--fallback-model`). On a hard primary failure the client switches to the fallback for the rest of the process. See `.env.example` for placeholders.
 
+### Query instructions for instruction-aware models
+
+Qwen3-Embedding models expect queries in the form `Instruct: <task>\nQuery:<query>` while documents are embedded as-is. When the model name contains `qwen3-embedding`, `query` adds a generic retrieval instruction automatically; other models get the raw query. Override the task with `--query-instruction "<task>"` or `SEMANTIC_SEARCH_QUERY_INSTRUCTION`, and disable it with `--query-instruction none`. Only the query side changes, so existing caches stay valid. Detection uses the primary model name: if your server exposes Qwen3-Embedding under an alias, set the instruction explicitly. An instruction set through the flag or the variable applies to whatever model is configured, not only to Qwen.
+
+On a 102-file demo workspace indexed with Qwen3-Embedding-8B, a meeting note that answered four differently-phrased questions ranked 57th to 163rd without the instruction (near-empty heading chunks ranked first) and 1st to 4th with it.
+
 ## Basic Usage
 
 ```bash

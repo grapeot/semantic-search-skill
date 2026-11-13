@@ -115,7 +115,7 @@ def test_query_reader_does_not_create_or_use_filelock(tmp_path, monkeypatch, cap
         def __init__(self, *args, **kwargs) -> None:
             pass
 
-        def embed_batch(self, texts):
+        def embed_batch(self, texts, **kwargs):
             return [[1.0, 0.0] for _ in texts]
 
     monkeypatch.setattr(cli, "EmbeddingClient", FakeEmbedder)
@@ -152,3 +152,70 @@ def test_counter_event_contains_only_aggregate_fields(tmp_path, monkeypatch) -> 
     assert private_path not in content
     assert "files_scanned" in content
     assert "query" in content
+
+
+def test_query_input_adds_instruction_for_qwen3_embedding(monkeypatch) -> None:
+    from semantic_search_skill.cli import DEFAULT_QUERY_TASK, query_input
+
+    monkeypatch.delenv("SEMANTIC_SEARCH_QUERY_INSTRUCTION", raising=False)
+    assert query_input("demo rules", "Qwen/Qwen3-Embedding-8B") == f"Instruct: {DEFAULT_QUERY_TASK}\nQuery:demo rules"
+    assert query_input("demo rules", "text-embedding-qwen3-embedding-8b").startswith("Instruct: ")
+    assert query_input("demo rules", "text-embedding-3-small") == "demo rules"
+
+
+def test_query_input_override_and_disable(monkeypatch) -> None:
+    from semantic_search_skill.cli import query_input
+
+    monkeypatch.setenv("SEMANTIC_SEARCH_QUERY_INSTRUCTION", "Find meeting notes")
+    assert query_input("q", "text-embedding-3-small") == "Instruct: Find meeting notes\nQuery:q"
+    assert query_input("q", "Qwen/Qwen3-Embedding-8B", "none") == "q"
+    assert query_input("q", "Qwen/Qwen3-Embedding-8B", "Custom task") == "Instruct: Custom task\nQuery:q"
+
+
+def test_query_input_empty_env_and_case(monkeypatch) -> None:
+    from semantic_search_skill.cli import DEFAULT_QUERY_TASK, query_input
+
+    monkeypatch.setenv("SEMANTIC_SEARCH_QUERY_INSTRUCTION", "")
+    assert query_input("q", "Qwen/Qwen3-Embedding-8B") == f"Instruct: {DEFAULT_QUERY_TASK}\nQuery:q"
+    assert query_input("a\nb", "Qwen/Qwen3-Embedding-8B", "NONE") == "a b"
+
+
+def test_instruction_newline_survives_normalization() -> None:
+    from semantic_search_skill.cli import query_input
+    from semantic_search_skill.embedding import _normalize_input
+
+    text = query_input("line one\nline two", "Qwen/Qwen3-Embedding-8B")
+    sent = _normalize_input(text, 3000, keep_newlines=True)
+    assert sent.count("\n") == 1 and sent.split("\n")[1] == "Query:line one line two"
+    assert "\n" not in _normalize_input(text, 3000)
+
+
+def test_run_query_sends_instruction_with_newline(tmp_path, monkeypatch, capsys) -> None:
+    source = tmp_path / "note.md"
+    source.write_text("hello", encoding="utf-8")
+    file_list = tmp_path / "files.txt"
+    file_list.write_text(str(source), encoding="utf-8")
+    cache = tmp_path / "cache"
+    model = "Qwen/Qwen3-Embedding-8B"
+    index = SemanticIndex(cache, CacheConfig(provider="openai", model=model))
+    index.replace_files([Chunk(id=f"{source}:0", source_file=str(source), text="hello")], np.asarray([[1.0, 0.0]], dtype=np.float32), [str(source)])
+    sent: list = []
+
+    class FakeEmbedder:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def embed_batch(self, texts, **kwargs):
+            sent.append((list(texts), kwargs))
+            return [[1.0, 0.0] for _ in texts]
+
+    monkeypatch.setattr(cli, "EmbeddingClient", FakeEmbedder)
+    monkeypatch.delenv("SEMANTIC_SEARCH_QUERY_INSTRUCTION", raising=False)
+    status = run_query(build_parser().parse_args([
+        "--model", model, "query", "--file-list", str(file_list), "--query", "hello", "--cache-dir", str(cache), "--no-refresh",
+    ]))
+    capsys.readouterr()
+    assert status == 0
+    (texts, kwargs), = sent
+    assert texts[0].startswith("Instruct: ") and texts[0].endswith("\nQuery:hello")
+    assert kwargs == {"keep_newlines": True}

@@ -39,8 +39,9 @@ class EmbeddingClient:
         self.max_retries = max_retries
         self.max_input_chars = max_input_chars
 
-    def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        normalized = [_normalize_input(text, self.max_input_chars) for text in texts]
+    def embed_batch(self, texts: list[str], *, keep_newlines: bool = False) -> list[list[float]]:
+        """Embed texts. Newlines are flattened to spaces unless keep_newlines (query instructions need theirs)."""
+        normalized = [_normalize_input(text, self.max_input_chars, keep_newlines=keep_newlines) for text in texts]
         if not self._use_fallback:
             try:
                 return self._embed_with(self.client, self.model, normalized)
@@ -107,8 +108,8 @@ def _retry_delay(exc: Exception, attempt: int) -> float:
     return min(0.5 * (2**attempt), 30.0)
 
 
-def _normalize_input(text: str, max_chars: int) -> str:
-    normalized = text.replace("\n", " ").strip()
+def _normalize_input(text: str, max_chars: int, *, keep_newlines: bool = False) -> str:
+    normalized = (text if keep_newlines else text.replace("\n", " ")).strip()
     if len(normalized) <= max_chars:
         return normalized
     return normalized[:max_chars]

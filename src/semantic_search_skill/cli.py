@@ -16,6 +16,9 @@ from .embedding import DEFAULT_MODEL, DEFAULT_PROVIDER, EmbeddingClient, estimat
 from .index import CacheConfig, CacheError, FileState, SemanticIndex, canonical_source_path, file_state, migrate_v1_cache, normalize_query, normalize_vectors
 from .models import SearchResult
 
+# Qwen's default retrieval task ("Given a web search query, ...") without "web": we search local files.
+DEFAULT_QUERY_TASK = "Given a search query, retrieve relevant passages that answer the query"
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Semantic search over local text files")
@@ -37,6 +40,13 @@ def build_parser() -> argparse.ArgumentParser:
     query.add_argument("--batch-size", type=int, default=128)
     query.add_argument("--file-batch-size", type=int, default=2000)
     query.add_argument("--no-refresh", action="store_true", help="Do not index changed files before querying")
+    query.add_argument(
+        "--query-instruction",
+        default=None,
+        help="Task instruction prepended to the query for instruction-aware embedding models "
+        "(Qwen3-Embedding: 'Instruct: <task>\\nQuery:<query>'). Defaults to SEMANTIC_SEARCH_QUERY_INSTRUCTION, "
+        "else a generic retrieval task for Qwen3-Embedding models and nothing for other models. Use 'none' to disable.",
+    )
     query.add_argument("--counter", action="store_true", default=None, help="Enable counter event for this run")
 
     rebuild = subparsers.add_parser("rebuild", help="Build or refresh cache for a file list")
@@ -143,6 +153,27 @@ def run_rebuild(args: argparse.Namespace) -> int:
     return 0
 
 
+def query_input(query: str, model: str, instruction: str | None = None) -> str:
+    """Text to embed for a query.
+
+    Instruction-aware embedding models such as Qwen3-Embedding expect queries as
+    'Instruct: <task>\nQuery:<query>' while documents are embedded as-is. Without the
+    instruction, near-empty chunks (a lone heading) outrank the passage that answers the query.
+    Only the query side changes, so existing caches stay valid. The query itself is flattened to
+    one line; the newline before "Query:" is kept, so embed the result with keep_newlines=True.
+    An empty SEMANTIC_SEARCH_QUERY_INSTRUCTION counts as unset.
+    """
+    flat = query.replace("\n", " ").strip()
+    if instruction is None:
+        instruction = os.environ.get("SEMANTIC_SEARCH_QUERY_INSTRUCTION") or None
+    if instruction is None:
+        instruction = DEFAULT_QUERY_TASK if "qwen3-embedding" in model.lower() else ""
+    instruction = instruction.strip()
+    if not instruction or instruction.lower() == "none":
+        return flat
+    return f"Instruct: {instruction}\nQuery:{flat}"
+
+
 def run_query(args: argparse.Namespace) -> int:
     file_paths = read_file_list(args.file_list, args.source_root)
     cache_dir = cache_dir_from_args(args)
@@ -154,7 +185,8 @@ def run_query(args: argparse.Namespace) -> int:
         event = {"files_scanned": len(file_paths), "files_updated": 0, "chunks_added": 0, "embedding_requests": 0}
     else:
         event = refresh_index(index, file_paths, args, embedder=embedder)
-    query_vector = np.asarray(embedder.embed_batch([args.query])[0], dtype=np.float32)
+    text = query_input(args.query, config.model, getattr(args, "query_instruction", None))
+    query_vector = np.asarray(embedder.embed_batch([text], keep_newlines=True)[0], dtype=np.float32)
     results = index.search(file_paths, query_vector, args.top_k)
     event = {"command": "query", **event, "query_embedding_requests": 1, "result_count": len(results)}
     maybe_write_counter(args, cache_dir, event)
